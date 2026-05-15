@@ -1,0 +1,10 @@
+## IDF Component Manager Manifest File
+dependencies:
+  ## Required IDF version
+  idf:
+    version: '>=5.5.4'
+  espressif/led_strip: ^3.0.3
+  espressif/arduino-esp32: ^3.3.6
+  FastAccelStepper:
+    git: https://github.com/gin66/FastAccelStepper.git
+    version: v0.33.13

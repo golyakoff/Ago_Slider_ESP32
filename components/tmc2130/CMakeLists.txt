@@ -1,0 +1,11 @@
+idf_component_register(
+    SRCS 
+        "src/tmc2130.c"
+        "src/tmc2130_trinamic.c"
+    INCLUDE_DIRS 
+        "include"
+    REQUIRES 
+        esp_driver_spi
+        driver
+        esp_timer
+)

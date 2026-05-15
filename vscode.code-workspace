@@ -1,0 +1,47 @@
+{
+	"folders": [
+		{
+			"path": "."
+		}
+	],
+	"settings": {
+		"cSpell.words": [
+			"AMPL",
+			"bluedroid",
+			"CCCD",
+			"CHNL",
+			"DISFDCC",
+			"DISS2G",
+			"GATTS",
+			"gconf",
+			"gstat",
+			"HEND",
+			"HSPI",
+			"HSTRT",
+			"ICID",
+			"INTPOL",
+			"IRAM",
+			"LEDC",
+			"LOGE",
+			"LOGI",
+			"LOGW",
+			"MISO",
+			"MOSI",
+			"OTPW",
+			"pwmconf",
+			"RNDTF",
+			"Rsense",
+			"SCLK",
+			"SRCS",
+			"STALLGUARD",
+			"stealthchop",
+			"STST",
+			"TPWMTHRS",
+			"TRINAMIC",
+			"txpower",
+			"VHIGHCHM",
+			"VHIGHFS",
+			"VSPI"
+		]
+	}
+}

@@ -1,0 +1,13 @@
+idf_component_register(
+    SRCS 
+        "src/motion.cpp"
+    INCLUDE_DIRS 
+        "include"
+    REQUIRES 
+        FastAccelStepper
+        pca9555
+        tmc2130
+        freertos
+        log
+        esp_timer
+)

@@ -1,0 +1,13 @@
+idf_component_register(
+    SRCS 
+        "src/ble.c"
+        "src/ota.c"
+    INCLUDE_DIRS 
+        "include"
+    REQUIRES
+        bt
+        nvs_flash
+        freertos
+        log
+        app_update
+)
