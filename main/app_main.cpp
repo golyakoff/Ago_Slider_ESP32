@@ -718,6 +718,18 @@ static void ble_apply_config(const app_config_t *cfg)
     // Microsteps
     ble_set_microsteps_value(cfg->microsteps[0], cfg->microsteps[1], cfg->microsteps[2]);
 
+     // Run current (3 x uint16 mA)
+    uint16_t run_x = cfg->run_current[0] | (cfg->run_current[1] << 8);
+    uint16_t run_c = cfg->run_current[2] | (cfg->run_current[3] << 8);
+    uint16_t run_b = cfg->run_current[4] | (cfg->run_current[5] << 8);
+    ble_set_run_current_value(run_x, run_c, run_b);
+
+    // Hold current  (3 x uint16 mA)
+    uint16_t hold_x = cfg->hold_current[0] | (cfg->hold_current[1] << 8);
+    uint16_t hold_c = cfg->hold_current[2] | (cfg->hold_current[3] << 8);
+    uint16_t hold_b = cfg->hold_current[4] | (cfg->hold_current[5] << 8);
+    ble_set_hold_current_value(hold_x, hold_c, hold_b);
+
     // Axis unit (packed byte -> three bool flags: true = degrees)
     bool x_deg = (cfg->axis_unit & 0x01) != 0;
     bool c_deg = (cfg->axis_unit & 0x02) != 0;

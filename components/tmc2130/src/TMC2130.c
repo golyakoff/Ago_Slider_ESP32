@@ -519,20 +519,15 @@ esp_err_t tmc2130_configure_ihold_irun(
         ESP_LOGW(TAG, "Driver #%d: Hold delay too high, limited to 15", driver_id);
     }
 
-    uint32_t ihold_irun = (cs_run << 0) |      // IRUN
-                          (cs_hold << 8) |     // IHOLD
-                          (hold_delay << 16);  // IHOLDDELAY
     
-    /**
-     * IHOLD_IRUN register format:
-     * Bits 0-4:   IRUN - Running current (0-31)
-     * Bits 8-12:  IHOLD - Hold current (0-31)
-     * Bits 16-19: IHOLDDELAY - Delay before reducing to hold current (0-15)
-     */
-    ihold_irun = (cs_run  << 0)  |   // IRUN
-                 (cs_hold << 8)  |   // IHOLD
-                 (hold_delay << 16); // IHOLDDELAY
-    
+    // IHOLD_IRUN register format:
+    // Bits 0-4:   IHOLD - Hold current (0-31)
+    // Bits 8-12:  IRUN - Running current (0-31)
+    // Bits 16-19: IHOLDDELAY - Delay before reducing to hold current (0-15)
+    uint32_t ihold_irun = (cs_hold << 0) |      // IHOLD
+                          (cs_run << 8) |       // IRUN
+                          (hold_delay << 16);   // IHOLDDELAY
+
     esp_err_t res = tmc2130_writeRegister(driver_id, TMC2130_IHOLD_IRUN, ihold_irun);
     if (res != ESP_OK) {
         ESP_LOGE(
@@ -573,8 +568,14 @@ esp_err_t tmc2130_configure_gconf(uint8_t driver_id, bool stealthchop, bool inve
     gconf_value = invert_dir                        
         ? gconf_value | TMC2130_SHAFT_MASK          // invert shaft direction if needed
         : gconf_value & ~TMC2130_SHAFT_MASK;
-    gconf_value &= ~TMC2130_DIAG0_ERROR_MASK;       // do not use Diag0 for driver error
-    gconf_value &= ~TMC2130_DIAG0_OTPW_MASK;        // do not use Diag0 for driver overheat warning
+    gconf_value &= ~TMC2130_DIAG0_ERROR_MASK;       // do not use DIAG0 for driver error
+    gconf_value |= TMC2130_DIAG0_OTPW_MASK;         // use DIAG0 for driver over temperature prewarning
+    gconf_value |= TMC2130_DIAG0_INT_PUSHPULL_MASK; // enable DIAG0 push pull output (active high)
+    gconf_value |= TMC2130_DIAG1_INDEX_MASK;        // Enable DIAG1 active on index position 
+                                                    // (microstep look up table position 0)
+    gconf_value |= TMC2130_DIAG1_ONSTATE_MASK;      // Enable DIAG1 active when chopper is on 
+                                                    // (for the coil which is in the second half of the fullstep)
+    gconf_value |= TMC2130_DIAG1_POSCOMP_PUSHPULL_MASK; // enable DIAG1 push pull output (active high)
 
     esp_err_t res = tmc2130_writeRegister(driver_id, TMC2130_GCONF, gconf_value);
     if (res != ESP_OK) {
@@ -737,6 +738,7 @@ static esp_err_t configure_single_driver(uint8_t driver_id) {
         &actual_current           // Output: Actual current that will be achieved
     );
     if (res != ESP_OK) {
+        ESP_LOGE(TAG, "Driver #%d: Failed to calculate hold current params", driver_id);
         return res;
     }
     else
@@ -763,26 +765,30 @@ static esp_err_t configure_single_driver(uint8_t driver_id) {
         cs_hold,
         driver->hold_delay_ms);
     if (res != ESP_OK) {
+        ESP_LOGE(TAG, "Driver #%d: Failed to write IHOLD_IRUN", driver_id);
         return res;
     }
-    
+
     res = tmc2130_configure_chopconf(
         driver_id,
         current_bus.drivers[driver_id].stealthchop,
         current_bus.drivers[driver_id].microsteps,
         vsense_high); // Pass calculated VSENSE
-    if (res != ESP_OK) { 
+    if (res != ESP_OK) {
+        ESP_LOGE(TAG, "Driver #%d: Failed to configure CHOPCONF", driver_id);
         return res;
     }
 
+    // Configure PWMCONF
     res = tmc2130_configure_pwmconf(driver_id, true, 0);
     if (res != ESP_OK) {
+        ESP_LOGE(TAG, "Driver #%d: Failed to configure PWMCONF", driver_id);
         return res;
-    }    
-    
+    }
+
     /// TODO: add config for TMC2130_COOLCONF
-        
-    ESP_LOGI(TAG, "TMC2130 initialized successfully");
+
+    ESP_LOGI(TAG, "Driver #%d: TMC2130 initialized successfully", driver_id);
     return ESP_OK;
 }
 
@@ -1022,8 +1028,8 @@ esp_err_t tmc2130_set_microsteps(uint8_t driver_id, uint8_t microsteps_code)
 
 /**
  * @brief Set run current (RMS) for a driver (runtime).
- * @param driver_id driver index
- * @param ma desired current in milliamperes
+ * @param driver_id driver index (0..TMC2130_BUS_NUM_DRIVERS-1)
+ * @param ma desired run current in milliamperes
  * @return ESP_OK on success
  */
 esp_err_t tmc2130_set_run_current(uint8_t driver_id, uint16_t ma)

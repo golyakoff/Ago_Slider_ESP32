@@ -238,6 +238,22 @@ void ble_init(
 void ble_set_microsteps_value(uint8_t x, uint8_t c, uint8_t b);
 
 /**
+ * @brief Set run current buffer before BLE initialisation.
+ * @param x  run current in mA for X axis (uint16_t)
+ * @param c  run current in mA for C axis
+ * @param b  run current in mA for B axis
+ */
+void ble_set_run_current_value(uint16_t x, uint16_t c, uint16_t b);
+
+/**
+ * @brief Set hold current buffer before BLE initialisation.
+ * @param x  hold current in mA for X axis (uint16_t)
+ * @param c  hold current in mA for C axis
+ * @param b  hold current in mA for B axis
+ */
+void ble_set_hold_current_value(uint16_t x, uint16_t c, uint16_t b);
+
+/**
  * @brief Set axis unit before BLE initialisation.
  * @param x_deg  True if unit for X axis is degrees, False for mm.
  * @param c_deg  True if unit for C axis is degrees, False for mm.

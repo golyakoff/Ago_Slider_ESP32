@@ -1221,6 +1221,26 @@ void ble_set_microsteps_value(uint8_t x, uint8_t c, uint8_t b)
     microsteps_val[2] = b;
 }
 
+void ble_set_run_current_value(uint16_t x, uint16_t c, uint16_t b)
+{
+    run_current_val[0] = x & 0xFF;
+    run_current_val[1] = (x >> 8) & 0xFF;
+    run_current_val[2] = c & 0xFF;
+    run_current_val[3] = (c >> 8) & 0xFF;
+    run_current_val[4] = b & 0xFF;
+    run_current_val[5] = (b >> 8) & 0xFF;
+}
+
+void ble_set_hold_current_value(uint16_t x, uint16_t c, uint16_t b)
+{
+    hold_current_val[0] = x & 0xFF;
+    hold_current_val[1] = (x >> 8) & 0xFF;
+    hold_current_val[2] = c & 0xFF;
+    hold_current_val[3] = (c >> 8) & 0xFF;
+    hold_current_val[4] = b & 0xFF;
+    hold_current_val[5] = (b >> 8) & 0xFF;
+}
+
 void ble_set_axis_unit_value(bool x_deg, bool c_deg, bool b_deg)
 {
     uint8_t packed = 0;
