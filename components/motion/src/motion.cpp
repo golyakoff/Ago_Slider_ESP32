@@ -32,7 +32,6 @@ static bool s_axis_deg[3] = {false, false, false};   // true = degrees, false = 
 static float s_units_per_step[3] = {0.0f, 0.0f, 0.0f};
 static bool s_virtual_limit_enabled[3] = {false, false, false};
 
-
 #define HOMING_TIMEOUT_MS   30000
 
 // -----------------------------------------------------------------------------
@@ -45,6 +44,42 @@ static void stop_all_axes(void) {
     }
 }
 
+/**
+ * @brief Background task that continuously monitors limit switches.
+ *        If a virtual limit is enabled for an axis and its limit switch
+ *        becomes active, the axis is stopped immediately using forceStop().
+ *        Runs every 50 ms.
+ */
+static void monitor_limits_task(void *arg) {
+    while (1) {
+        // Read current limit switch states
+        bool x_lim = false, c_lim = false, b_lim = false;
+        motion_get_limits(&x_lim, &c_lim, &b_lim);
+
+        // Stop axis if virtual limit enabled and limit active
+        if (s_virtual_limit_enabled[0] && x_lim && s_steppers[0]) {
+            s_steppers[0]->forceStop();
+            ESP_LOGI(TAG, "Virtual limit X triggered, axis stopped");
+        }
+        if (s_virtual_limit_enabled[1] && c_lim && s_steppers[1]) {
+            s_steppers[1]->forceStop();
+            ESP_LOGI(TAG, "Virtual limit C triggered, axis stopped");
+        }
+        if (s_virtual_limit_enabled[2] && b_lim && s_steppers[2]) {
+            s_steppers[2]->forceStop();
+            ESP_LOGI(TAG, "Virtual limit B triggered, axis stopped");
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+}
+
+/**
+ * @brief Task that monitors limit switches during homing.
+ *        Stops each axis when its limit switch is triggered.
+ *        Sends BLE notifications on progress and checks timeout.
+ *        Runs every 50 ms.
+ */
 static void homing_task(void *arg) {
     while (1) {
         if (!s_homing.active) {
@@ -106,7 +141,7 @@ static void homing_task(void *arg) {
             s_homing.active = false;
         }
 
-        vTaskDelay(pdMS_TO_TICKS(20));
+        vTaskDelay(pdMS_TO_TICKS(50));
     }
 }
 
@@ -129,6 +164,7 @@ void motion_init(FastAccelStepper* stepper_x,
     s_home_cb = home_status_cb;
 
     xTaskCreate(homing_task, "homing_monitor", 4096, nullptr, 1, nullptr);
+    xTaskCreate(monitor_limits_task, "limit_monitor", 2048, nullptr, 1, nullptr);
     ESP_LOGI(TAG, "Motion controller initialised");
 }
 
