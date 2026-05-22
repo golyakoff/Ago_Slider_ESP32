@@ -51,7 +51,7 @@ typedef void (*ble_home_cmd_cb_t)(bool home_x, bool home_c, bool home_b);
  * @param c  steps (or mm/deg * 10) for C axis
  * @param b  steps (or mm/deg * 10) for B axis
  */
-typedef void (*ble_move_cb_t)(int16_t x, int16_t c, int16_t b);
+typedef void (*ble_move_cb_t)(int32_t x, int32_t c, int32_t b);
 
 /**
  * @brief Callback for LIMIT characteristic read request.

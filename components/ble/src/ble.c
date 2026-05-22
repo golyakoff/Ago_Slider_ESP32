@@ -299,7 +299,7 @@ static const uint16_t character_declaration_uuid   = ESP_GATT_UUID_CHAR_DECLARE;
 static const uint16_t character_client_config_uuid = ESP_GATT_UUID_CHAR_CLIENT_CONFIG;
 
 // Default values for characteristics
-static const uint8_t move_default_val[6] = {0,0,0,0,0,0};
+static const uint8_t move_default_val[12] = {0};
 static const uint8_t limit_default_val[1] = {0};
 
 static uint8_t microsteps_val[3] =      {16, 16, 16};                        // 1/16 for all axis
@@ -442,7 +442,7 @@ static const esp_gatts_attr_db_t gatt_db[HRS_IDX_NB] = {
     [IDX_CHAR_VAL_MOVE] = {
         {ESP_GATT_AUTO_RSP},
         {ESP_UUID_LEN_16, (uint8_t *)&move_char_uuid, ESP_GATT_PERM_WRITE,
-         6, 6, (uint8_t *)move_default_val}
+         12, 12, (uint8_t *)move_default_val}
     },
 
     // BATT_LEVEL Characteristic Declaration
@@ -784,12 +784,23 @@ static void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_
             }
             // Handle MOVE characteristic write
             else if (handle == handle_table[IDX_CHAR_VAL_MOVE]) {
-                if (param->write.len >= 6 && s_move_cb) {
-                    int16_t *speeds = (int16_t*)param->write.value;
-                    s_move_cb(speeds[0], speeds[1], speeds[2]);
-                    ESP_LOGI(TAG, "Move: X=%d, C=%d, B=%d", speeds[0], speeds[1], speeds[2]);
+                if (param->write.len == 12 && s_move_cb) {
+                    int32_t x =   (int32_t)param->write.value[0] |
+                                 ((int32_t)param->write.value[1]  <<  8) |
+                                 ((int32_t)param->write.value[2]  << 16) |
+                                 ((int32_t)param->write.value[3]  << 24);
+                    int32_t c =   (int32_t)param->write.value[4] |
+                                 ((int32_t)param->write.value[5]  <<  8) |
+                                 ((int32_t)param->write.value[6]  << 16) |
+                                 ((int32_t)param->write.value[7]  << 24);
+                    int32_t b =   (int32_t)param->write.value[8] |
+                                 ((int32_t)param->write.value[9]  <<  8) |
+                                 ((int32_t)param->write.value[10] << 16) |
+                                 ((int32_t)param->write.value[11] << 24);
+                    s_move_cb(x, c, b);
+                    ESP_LOGI(TAG, "Move: X=%d, C=%d, B=%d", x, c, b);
                 } else {
-                    ESP_LOGW(TAG, "Move write length %d (expected 6)", param->write.len);
+                    ESP_LOGW(TAG, "Move write length %d (expected 12)", param->write.len);
                 }
                 if (param->write.need_rsp) {
                     esp_ble_gatts_send_response(gatts_if, param->write.conn_id, param->write.trans_id, ESP_GATT_OK, NULL);

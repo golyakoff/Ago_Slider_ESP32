@@ -109,7 +109,7 @@ static void on_ble_connect(void);
 static void on_ble_disconnect(void);
 static void led_indicator_task(void *arg);
 
-static void on_ble_move(int16_t x_speed, int16_t y_speed, int16_t z_speed);
+static void on_ble_move(int32_t x_speed, int32_t y_speed, int32_t z_speed);
 static void on_ble_mot_en(bool enable);
 static void on_ble_home(bool home_x, bool home_c, bool home_b);
 static void on_ble_limit_read(bool *x, bool *c, bool *b);
@@ -601,7 +601,7 @@ static void on_ble_home(bool home_x, bool home_c, bool home_b) {
     motion_start_homing(home_x, home_c, home_b);
 }
 
-static void on_ble_move(int16_t x, int16_t c, int16_t b) {
+static void on_ble_move(int32_t x, int32_t c, int32_t b) {
     ESP_LOGI("Slider", "Moving: X=%d, Y=%d, Z=%d", x, c, b);
     motion_move_relative(x, c, b);
 }
