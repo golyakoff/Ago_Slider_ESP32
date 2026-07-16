@@ -15,7 +15,10 @@ contract any BLE-facing change must stay compatible with.
 This is a standard ESP-IDF project (not Arduino/PlatformIO despite pulling in `arduino-esp32` as
 a component). Requires the ESP-IDF v5.5.4 environment to be sourced (`idf.py` on PATH); on this
 machine IDF lives at `C:\esp\v5.5.4\esp-idf` and the target COM port is `COM4` (see
-`.vscode/settings.json`).
+`.vscode/settings.json`). To activate the environment in a shell, dot-source the EIM profile in
+PowerShell: `. "C:\Espressif\tools\Microsoft.v5.5.4.PowerShell_profile.ps1"` (the plain
+`export.ps1` fails — the Python venv lives under `C:\Espressif\tools`, not the default path).
+See also the project skills: `flash` (build/flash/monitor) and `release` (tagging + CI).
 
 ```
 idf.py set-target esp32
