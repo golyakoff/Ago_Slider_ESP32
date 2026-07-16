@@ -24,10 +24,10 @@ and needed to be redesigned for ESP-IDF.
   be regenerated with `idf.py save-defconfig` after any menuconfig change that should
   affect CI builds.
 
-Remaining:
-
-- Reconsider the BLE transfer protocol (chunk size vs. MTU 517, missing ack/flow control,
-  progress notifications back to the client) together with the Android app's
-  `FirmwareRepository` — both sides must change in sync. The Android side also paces the
-  transfer with a fixed 30 ms delay per 512-byte chunk — with ack/flow control that delay
-  can go away.
+- [x] OTA transfer flow control (firmware v0.1.2 + app v0.1.1): OTA_DATA/OTA_CONTROL are
+  now `ESP_GATT_RSP_BY_APP` — the ATT write response is sent only after the chunk hits
+  flash (for the "end" command — after image validation), so the phone's awaited write
+  response IS the ack. The app sends chunks of MTU-3 bytes (single Write Request instead
+  of the previous 512-byte Prepare/Execute long writes — 3 round trips each) and the
+  fixed 30 ms per-chunk delay is gone. Prepared long writes are still supported firmware-
+  side (buffer + EXEC_WRITE) for compatibility with app v0.1.0.

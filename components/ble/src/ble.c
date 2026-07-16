@@ -329,6 +329,12 @@ static char version_val[32] = "0.0.1";          // firmware version string (max 
 static uint8_t ota_control_val[5] = {0};        // up to 5 bytes (command + 32-bit size)
 static uint8_t ota_data_val[512] = {0};         // buffer for OTA data chunks (adjust size if needed)
 
+// Reassembly buffer for prepared (long) writes to OTA_DATA — used when the
+// client's chunk size exceeds MTU-3 and Android falls back to ATT
+// Prepare/Execute Write. Flashed on ESP_GATTS_EXEC_WRITE_EVT.
+static uint8_t  ota_prep_buf[512];
+static uint16_t ota_prep_len = 0;
+
 // Default callbacks
 static ble_start_cb_t s_start_cb = NULL;
 static ble_connect_cb_t s_connect_cb = NULL;
@@ -679,9 +685,13 @@ static const esp_gatts_attr_db_t gatt_db[HRS_IDX_NB] = {
          CHAR_DECLARATION_SIZE, CHAR_DECLARATION_SIZE, (uint8_t *)&char_prop_w}
     },
 
-    // OTA Control Characteristic Value
+    // OTA Control Characteristic Value.
+    // RSP_BY_APP: the ATT write response is sent by the app only after the
+    // command has been processed (for 0x02 "end" that includes image
+    // validation and setting the boot partition), so the client's write
+    // completion doubles as an acknowledgement.
     [IDX_CHAR_VAL_OTA_CONTROL] = {
-        {ESP_GATT_AUTO_RSP},
+        {ESP_GATT_RSP_BY_APP},
         {ESP_UUID_LEN_16, (uint8_t *)&ota_control_char_uuid_str, ESP_GATT_PERM_WRITE,
          5, 5, ota_control_val}
     },
@@ -693,9 +703,12 @@ static const esp_gatts_attr_db_t gatt_db[HRS_IDX_NB] = {
          CHAR_DECLARATION_SIZE, CHAR_DECLARATION_SIZE, (uint8_t *)&char_prop_w}
     },
 
-    // OTA Data Characteristic Value
+    // OTA Data Characteristic Value.
+    // RSP_BY_APP: the response is sent only after esp_ota_write() has
+    // finished, giving the client per-chunk flow control (no artificial
+    // pacing delays needed on the phone side).
     [IDX_CHAR_VAL_OTA_DATA] = {
-        {ESP_GATT_AUTO_RSP},
+        {ESP_GATT_RSP_BY_APP},
         {ESP_UUID_LEN_16, (uint8_t *)&ota_data_char_uuid_str, ESP_GATT_PERM_WRITE,
          512, 512, ota_data_val}
     },
@@ -999,9 +1012,38 @@ static void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_
             }
             // Handle OTA data write
             else if (handle == handle_table[IDX_CHAR_VAL_OTA_DATA] && s_ota_data_cb) {
-                s_ota_data_cb(param->write.value, param->write.len);
-                if (param->write.need_rsp) {
-                    esp_ble_gatts_send_response(gatts_if, param->write.conn_id, param->write.trans_id, ESP_GATT_OK, NULL);
+                if (param->write.is_prep) {
+                    // Prepared (long) write part: clients whose chunk size
+                    // exceeds MTU-3 arrive here. Buffer the part and echo it
+                    // back in the response as the ATT spec requires; the data
+                    // is flashed on ESP_GATTS_EXEC_WRITE_EVT.
+                    esp_gatt_status_t status = ESP_GATT_OK;
+                    if (param->write.offset > sizeof(ota_prep_buf)) {
+                        status = ESP_GATT_INVALID_OFFSET;
+                    } else if (param->write.offset + param->write.len > sizeof(ota_prep_buf)) {
+                        status = ESP_GATT_INVALID_ATTR_LEN;
+                    } else {
+                        memcpy(ota_prep_buf + param->write.offset, param->write.value, param->write.len);
+                        uint16_t end = param->write.offset + param->write.len;
+                        if (end > ota_prep_len) ota_prep_len = end;
+                    }
+                    if (param->write.need_rsp) {
+                        esp_gatt_rsp_t rsp = {0};
+                        rsp.attr_value.handle = handle;
+                        rsp.attr_value.offset = param->write.offset;
+                        rsp.attr_value.len = param->write.len;
+                        rsp.attr_value.auth_req = ESP_GATT_AUTH_REQ_NONE;
+                        memcpy(rsp.attr_value.value, param->write.value, param->write.len);
+                        esp_ble_gatts_send_response(gatts_if, param->write.conn_id, param->write.trans_id, status, &rsp);
+                    }
+                } else {
+                    // Plain write request: the flash write completes BEFORE
+                    // the response is sent (RSP_BY_APP) — per-chunk flow
+                    // control for the OTA transfer.
+                    s_ota_data_cb(param->write.value, param->write.len);
+                    if (param->write.need_rsp) {
+                        esp_ble_gatts_send_response(gatts_if, param->write.conn_id, param->write.trans_id, ESP_GATT_OK, NULL);
+                    }
                 }
             }
             // Handle CCCD for LIMIT
@@ -1064,6 +1106,18 @@ static void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_
                     esp_ble_gatts_send_response(gatts_if, param->write.conn_id, param->write.trans_id, ESP_GATT_OK, NULL);
                 }
             }
+            break;
+        }
+
+        case ESP_GATTS_EXEC_WRITE_EVT:
+        {
+            // Finish (or cancel) a prepared long write to OTA_DATA
+            if (param->exec_write.exec_write_flag == ESP_GATT_PREP_WRITE_EXEC &&
+                ota_prep_len > 0 && s_ota_data_cb) {
+                s_ota_data_cb(ota_prep_buf, ota_prep_len);
+            }
+            ota_prep_len = 0;
+            esp_ble_gatts_send_response(gatts_if, param->exec_write.conn_id, param->exec_write.trans_id, ESP_GATT_OK, NULL);
             break;
         }
 
