@@ -93,6 +93,12 @@ static bool ble_is_connected = false;
 
 static uint8_t last_batt_lvl_percent = 255;  // 255 = no INA219 reading yet
 
+// Last INA219 reading, re-published when a client connects
+static float last_voltage = 0.0f;
+static float last_current = 0.0f;
+static float last_power = 0.0f;
+static bool has_power_reading = false;
+
 void init_tmc2130(const app_config_t *cfg);
 void init_fastAccelStepper(const app_config_t *cfg);
 
@@ -119,6 +125,7 @@ static void on_limit_change(uint8_t pin, bool value);
 static void on_home_progress(bool x_req, bool c_req, bool b_req, bool x_homed, bool c_homed, bool b_homed);
 
 static void on_ina219_data(float voltage, float current, float power);
+static void publish_power_info(float voltage, float current, float power);
 
 static void on_microsteps(uint8_t x, uint8_t c, uint8_t b);
 static void on_run_current(uint16_t x, uint16_t c, uint16_t b);
@@ -564,6 +571,15 @@ static void on_ina219_data(float voltage, float current, float power) {
        ble_set_battery_level(batt_lvl_percent);
     }
 
+    last_voltage = voltage;
+    last_current = current;
+    last_power = power;
+    has_power_reading = true;
+
+    publish_power_info(voltage, current, power);
+}
+
+static void publish_power_info(float voltage, float current, float power) {
     ble_set_power_info(voltage, current, power);
 
     char str[40];
@@ -590,6 +606,15 @@ static void on_ble_connect(void) {
     // Re-publish the last known level so the fresh client can read it right away.
     if (last_batt_lvl_percent <= 100)
         ble_set_battery_level(last_batt_lvl_percent);
+
+    if (has_power_reading)
+        publish_power_info(last_voltage, last_current, last_power);
+
+    // Same for the limit switches: they are published from the interrupt, i.e. only when a
+    // switch changes, so publish the current state for the new client.
+    bool x_limited, c_limited, b_limited;
+    on_ble_limit_read(&x_limited, &c_limited, &b_limited);
+    ble_set_limit(x_limited, c_limited, b_limited);
 }
 
 static void on_ble_disconnect(void) {

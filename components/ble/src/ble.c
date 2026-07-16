@@ -753,6 +753,15 @@ static void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_
             // Store handles
             memcpy(handle_table, param->add_attr_tab.handles, sizeof(handle_table));
             attr_table_ready = true;
+            // Seed the version now, before any client can read it: the attribute still holds
+            // the build-time placeholder, and the READ_EVT handler below refreshes it only
+            // after the stack has already auto-responded — so without this the first read
+            // after a reboot would report the placeholder instead of the running version.
+            if (s_version_read_cb) {
+                const char *ver = s_version_read_cb();
+                esp_ble_gatts_set_attr_value(
+                    handle_table[IDX_CHAR_VAL_VERSION], strlen(ver), (uint8_t *)ver);
+            }
             // Start service
             esp_ble_gatts_start_service(handle_table[IDX_SVC]);
             // Start advertising
@@ -1350,12 +1359,15 @@ void ble_set_virtual_limit_value(bool x_en, bool c_en, bool b_en)
 }
 
 // ----------------------------- Send Limit Notification -----------------------------
+// The limit state is published only when a switch changes, so — as with the battery level —
+// the value is stored even while no client is connected, otherwise a client connecting after
+// a change would read a stale mask.
 void ble_set_limit(
     bool x_limited,
     bool c_limited,
     bool b_limited)
 {
-    if (!connected)
+    if (!attr_table_ready)
         return;
 
     uint8_t limit_mask = (x_limited ? 1 : 0) | (c_limited ? 2 : 0) | (b_limited ? 4 : 0);
@@ -1363,9 +1375,9 @@ void ble_set_limit(
     // Update characteristic value first (optional, but keep local copy)
     esp_ble_gatts_set_attr_value(
         handle_table[IDX_CHAR_VAL_LIMIT], sizeof(limit_mask), &limit_mask);
-    
+
     // Send notification (indicate = false)
-    if (limit_notify_enabled) {
+    if (connected && limit_notify_enabled) {
         esp_ble_gatts_send_indicate(
             s_gatts_if,
             conn_id,
@@ -1448,11 +1460,14 @@ void ble_set_battery_level(uint8_t percent) {
     }
 }
 
-// Set PWR_INFO characteristic value with notification
+// Set PWR_INFO characteristic value with notification.
+// Stored even while disconnected, for the same reason as the battery level: the INA219
+// reports only when its readings move, so a client connecting to a device on a steady
+// supply would otherwise read zeroes.
 void ble_set_power_info(float voltage, float current, float power) {
-    if (!connected) 
+    if (!attr_table_ready)
         return;
-    
+
     uint8_t buf[12];
     memcpy(buf, &voltage, 4);
     memcpy(buf+4, &current, 4);
@@ -1460,7 +1475,7 @@ void ble_set_power_info(float voltage, float current, float power) {
     
     esp_ble_gatts_set_attr_value(handle_table[IDX_CHAR_VAL_PWR_INFO], sizeof(buf), buf);
     
-    if (pwr_info_notify) {
+    if (connected && pwr_info_notify) {
         esp_ble_gatts_send_indicate(
             s_gatts_if,
             conn_id,
@@ -1471,11 +1486,12 @@ void ble_set_power_info(float voltage, float current, float power) {
     }
 }
 
-// Set PWR_INFO_STR characteristic value with notification
+// Set PWR_INFO_STR characteristic value with notification (stored while disconnected too,
+// see ble_set_power_info)
 void ble_set_power_info_string(const char* str) {
-    if (!connected) 
+    if (!attr_table_ready)
         return;
-    
+
     const int max_len = 40;
     size_t len = strlen(str);
     if (len > max_len)
@@ -1486,7 +1502,7 @@ void ble_set_power_info_string(const char* str) {
         len,
         (uint8_t*)str);
 
-    if (pwr_info_str_notify) {
+    if (connected && pwr_info_str_notify) {
         esp_ble_gatts_send_indicate(
             s_gatts_if,
             conn_id,
