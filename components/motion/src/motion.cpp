@@ -32,7 +32,8 @@ static bool s_axis_deg[3] = {false, false, false};   // true = degrees, false = 
 static float s_units_per_step[3] = {0.0f, 0.0f, 0.0f};
 static bool s_virtual_limit_enabled[3] = {false, false, false};
 
-#define HOMING_TIMEOUT_MS   30000
+// The X carriage needs well over 30 s to cross the full rail at homing speed
+#define HOMING_TIMEOUT_MS   90000
 
 // -----------------------------------------------------------------------------
 // Private methods
@@ -46,28 +47,22 @@ static void stop_all_axes(void) {
 
 /**
  * @brief Background task that continuously monitors limit switches.
- *        If a virtual limit is enabled for an axis and its limit switch
- *        becomes active, the axis is stopped immediately using forceStop().
- *        Runs every 50 ms.
+ *        If a virtual limit is enabled for an axis, its limit switch is
+ *        active and the axis is moving toward the switch (negative
+ *        direction), the axis is stopped using forceStop(). Moving away
+ *        from the switch stays allowed, otherwise a homed axis could
+ *        never leave its endstop. Runs every 50 ms.
  */
 static void monitor_limits_task(void *arg) {
     while (1) {
-        // Read current limit switch states
-        bool x_lim = false, c_lim = false, b_lim = false;
-        motion_get_limits(&x_lim, &c_lim, &b_lim);
+        bool lim[3] = {false, false, false};
+        motion_get_limits(&lim[0], &lim[1], &lim[2]);
 
-        // Stop axis if virtual limit enabled and limit active
-        if (s_virtual_limit_enabled[0] && x_lim && s_steppers[0]) {
-            s_steppers[0]->forceStop();
-            ESP_LOGI(TAG, "Virtual limit X triggered, axis stopped");
-        }
-        if (s_virtual_limit_enabled[1] && c_lim && s_steppers[1]) {
-            s_steppers[1]->forceStop();
-            ESP_LOGI(TAG, "Virtual limit C triggered, axis stopped");
-        }
-        if (s_virtual_limit_enabled[2] && b_lim && s_steppers[2]) {
-            s_steppers[2]->forceStop();
-            ESP_LOGI(TAG, "Virtual limit B triggered, axis stopped");
+        for (int i = 0; i < 3; i++) {
+            if (!s_virtual_limit_enabled[i] || !lim[i] || !s_steppers[i]) continue;
+            if (s_steppers[i]->getCurrentSpeedInMilliHz() >= 0) continue;
+            s_steppers[i]->forceStop();
+            ESP_LOGI(TAG, "Virtual limit %c triggered, axis stopped", "XCB"[i]);
         }
 
         vTaskDelay(pdMS_TO_TICKS(50));
@@ -98,11 +93,14 @@ static void homing_task(void *arg) {
             }
         }
 
-        // stop axes that hit limits
+        // stop axes that hit limits; a request is fulfilled (and cleared) the
+        // moment its endstop is reached, so `requested` always means "still on
+        // its way" — an axis that keeps the bit after homing ends never made it
         for (int i = 0; i < 3; i++) {
             if (s_homing.requested[i] && !s_homing.homed[i] && raw[i]) {
                 if (s_steppers[i]) s_steppers[i]->forceStop();
                 s_homing.homed[i] = true;
+                s_homing.requested[i] = false;
                 ESP_LOGI(TAG, "Axis %c homed", "XCB"[i]);
             }
         }
