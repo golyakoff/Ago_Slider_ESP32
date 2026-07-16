@@ -1,0 +1,2 @@
+# Debug build overlay (applied on top of sdkconfig.defaults in CI)
+CONFIG_LOG_DEFAULT_LEVEL_DEBUG=y

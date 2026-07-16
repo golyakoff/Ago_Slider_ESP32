@@ -27,6 +27,13 @@ idf.py menuconfig     # adjust partition table / component config
 There is no unit test suite in this repo — verification is build success plus on-device testing
 (flash + monitor + exercise BLE characteristics). `sdkconfig.ci` exists but is currently empty.
 
+Releases: pushing a `v*.*.*` tag triggers `.github/workflows/release.yml`, which builds debug and
+release variants from `sdkconfig.defaults` + `sdkconfig.debug`/`sdkconfig.release` overlays
+(CI ignores the committed `sdkconfig`, which serves local builds) and publishes
+`ago_slider_{debug,release}_16mb_fw.bin` to a GitHub Release — the asset names the Android app's
+update check expects. After menuconfig changes that CI should pick up, regenerate the defaults
+with `idf.py save-defconfig`.
+
 ## Architecture
 
 `main/app_main.cpp` is the composition root: it owns all GPIO/peripheral pin assignments (SPI
@@ -52,8 +59,7 @@ component's `CMakeLists.txt` to see what it's allowed to depend on before adding
 - **ble** — the entire BLE GATT server (service `0xFE95`) plus BLE OTA control/data
   characteristics. `ble_init()` takes one callback per characteristic (see `ble.h`); this is the
   single entry/exit point between BLE and the rest of the firmware — `app_main.cpp` never touches
-  the BLE/NimBLE stack directly. `ble/src/ota.c` implements the OTA write-to-flash logic invoked
-  through those callbacks.
+  the BLE stack directly.
 - **app_config** — defines the packed `app_config_t` struct (the single source of truth for all
   persisted settings: microsteps, run/hold current, axis units, steps-per-unit, speed/accel,
   virtual limit, StealthChop, direction invert) plus pack/unpack helpers to/from raw byte arrays
@@ -63,9 +69,14 @@ component's `CMakeLists.txt` to see what it's allowed to depend on before adding
   in one call. `app_main.cpp` loads config at boot and pushes it into both `ble` (so
   characteristic reads reflect persisted state) and `motion`/`tmc2130` (so hardware matches
   persisted state) before the rest of init runs.
-- **ota** (`components/ota`) — currently an empty/orphaned component (CMakeLists references
-  `src/ota.c` but no source files exist and it is not in `main`'s `REQUIRES`). The real OTA
-  implementation is `ble/src/ota.c`. Don't assume this component builds.
+- **ota** (`components/ota`) — BLE OTA write-to-flash logic on native `esp_ota_ops`
+  (sequential-write mode, deferred reboot via `esp_timer`). Firmware version comes from the app
+  descriptor via `git describe --tags` (PROJECT_VER is intentionally not set in CMake), exposed
+  via `ota_get_current_version()`; a build from a release tag reports exactly that tag, which
+  the Android app compares against. Rollback is enabled
+  (`CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`) — `app_main()` calls `ota_confirm_running_image()`
+  after successful init, otherwise the bootloader reverts to the previous image on the next
+  reboot.
 
 ### Config flow
 

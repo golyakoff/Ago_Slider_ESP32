@@ -2,24 +2,32 @@
 
 ## Rework BLE OTA subsystem
 
-The OTA implementation (`components/ble/src/ota.c` + OTA characteristics in `ble.c`) was
-ported from the `Matrix_Clock_ESP32` project, which was Arduino-based (`Arduino.h`/
-`Update.h`), while this firmware is pure ESP-IDF — the internals need to be redesigned
-for ESP-IDF instead of mimicking the Arduino flow. Points to cover:
+The OTA implementation was ported from the `Matrix_Clock_ESP32` project (Arduino-based)
+and needed to be redesigned for ESP-IDF.
 
-- Redesign the write path around native `esp_ota_ops` idioms (it already calls
-  `esp_ota_begin`/`esp_ota_write`, but the control flow / state machine is inherited from
-  the Arduino version).
-- Resolve the orphaned `components/ota` component: its CMakeLists references
-  `src/ota.c` that doesn't exist and it isn't in `main`'s REQUIRES — either implement the
-  OTA module there properly and move the logic out of the `ble` component, or delete it.
-- Firmware version should come from the ESP-IDF app descriptor (`esp_app_desc_t` /
-  `esp_app_get_description()`), set via project version in CMake, instead of a hand-kept
-  string.
-- Add post-update validation with rollback: `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`,
-  `esp_ota_mark_app_valid_cancel_rollback()` after a successful health check on first boot.
+- [x] Redesign the write path around native `esp_ota_ops` idioms: sequential-write mode
+  (no long blocking erase in `ota_begin`), no per-chunk `vTaskDelay` hack, overflow check,
+  reboot via one-shot `esp_timer` instead of `esp_restart()` inside the BLE callback.
+- [x] Resolve the orphaned `components/ota` component — OTA module now lives there
+  (moved out of `ble`), correct `PRIV_REQUIRES`, added to `main`'s REQUIRES.
+- [x] Firmware version comes from the app descriptor via `git describe --tags` (no
+  manual `PROJECT_VER` bump needed) — a build from a release tag gets exactly that tag,
+  which is what the Android app compares against.
+- [x] Rollback support: `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE` was already on, but
+  nothing ever confirmed the image — after an OTA the bootloader would roll back on the
+  next reboot. `ota_confirm_running_image()` is now called at the end of `app_main()`.
+
+- [x] GitHub Releases workflow (`.github/workflows/release.yml`): on a `v*.*.*` tag builds
+  debug and release variants (`sdkconfig.defaults` + `sdkconfig.debug`/`sdkconfig.release`
+  overlays) and publishes `ago_slider_debug_16mb_fw.bin` / `ago_slider_release_16mb_fw.bin`
+  with the matching CHANGELOG.md section as release notes. NOTE: `sdkconfig.defaults` must
+  be regenerated with `idf.py save-defconfig` after any menuconfig change that should
+  affect CI builds.
+
+Remaining:
+
 - Reconsider the BLE transfer protocol (chunk size vs. MTU 517, missing ack/flow control,
   progress notifications back to the client) together with the Android app's
-  `FirmwareRepository` — both sides must change in sync.
-- Set up a GitHub Releases workflow for this repo producing assets named
-  `*_release_4mb_fw.bin` — that's what the Android app's update check expects.
+  `FirmwareRepository` — both sides must change in sync. The Android side also paces the
+  transfer with a fixed 30 ms delay per 512-byte chunk — with ack/flow control that delay
+  can go away.

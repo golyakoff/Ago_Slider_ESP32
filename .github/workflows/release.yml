@@ -1,0 +1,82 @@
+name: Build and Publish Firmware Release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build and Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          # Full history with tags: PROJECT_VER comes from `git describe`,
+          # so the app descriptor version must resolve to the release tag
+          fetch-depth: 0
+
+      - name: Build debug firmware
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.5.4
+          target: esp32
+          command: idf.py -B build_debug -DSDKCONFIG=build_debug/sdkconfig -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.debug" build
+
+      - name: Build release firmware
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v5.5.4
+          target: esp32
+          command: idf.py -B build_release -DSDKCONFIG=build_release/sdkconfig -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.release" build
+
+      - name: Rename firmware binaries
+        run: |
+          cp build_debug/ago_slider.bin ago_slider_debug_16mb_fw.bin
+          cp build_release/ago_slider.bin ago_slider_release_16mb_fw.bin
+
+      - name: Read Changelog for current version
+        id: changelog
+        run: |
+          VERSION=${GITHUB_REF_NAME#v}
+          CHANGELOG_FILE="CHANGELOG.md"
+
+          if [ ! -f "$CHANGELOG_FILE" ]; then
+            echo "content=Changelog file not found." >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          BLOCK=$(awk -v ver="$VERSION" '
+            BEGIN { found=0; output="" }
+            /^# Release / {
+              if (found) exit
+              if (index($0, ver) > 0) { found=1; next }
+            }
+            found { output = output $0 "\n" }
+            END { print output }
+          ' "$CHANGELOG_FILE")
+
+          BLOCK=$(echo "$BLOCK" | sed -e '/^[[:space:]]*$/d' -e '1{/^$/d}' -e '${/^$/d}')
+
+          if [ -z "$BLOCK" ]; then
+            BLOCK="No changelog section found for version $VERSION."
+          fi
+
+          echo 'content<<EOF' >> $GITHUB_OUTPUT
+          echo "$BLOCK" >> $GITHUB_OUTPUT
+          echo 'EOF' >> $GITHUB_OUTPUT
+
+      - name: Create Release and Upload Firmware
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            ago_slider_debug_16mb_fw.bin
+            ago_slider_release_16mb_fw.bin
+          body: ${{ steps.changelog.outputs.content }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
