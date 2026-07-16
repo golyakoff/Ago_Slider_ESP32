@@ -13,6 +13,7 @@ idf_component_register(
         ina219
         nvs_flash
         ble
+        ota
         motion
         app_config
         nvs_config

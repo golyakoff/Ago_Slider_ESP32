@@ -40,6 +40,11 @@ typedef void (*ota_complete_cb_t)(bool success, const char* message);
 
 /**
  * @brief Start an OTA update.
+ *
+ * Uses sequential-write mode: the target partition is erased incrementally
+ * as data arrives, so this call returns quickly and does not block the
+ * caller (typically the BLE task) on a full-partition erase.
+ *
  * @param firmware_size          Expected total size of the new firmware.
  * @param on_ota_progress_cb     Callback for progress updates (may be NULL).
  * @param on_ota_status_cb       Callback for status messages (may be NULL).
@@ -59,10 +64,16 @@ bool ota_begin(
  * @param length Number of bytes to write.
  * @return true if the data was written successfully, false otherwise.
  */
-bool ota_write(uint8_t* data, size_t length);
+bool ota_write(const uint8_t* data, size_t length);
 
 /**
- * @brief Finalize the OTA update, validate the firmware, and reboot.
+ * @brief Finalize the OTA update.
+ *
+ * Verifies that the expected number of bytes was received, lets
+ * esp_ota_end() validate the image, sets the new boot partition and
+ * schedules a reboot ~1.5 s later — the delay lets the BLE stack deliver
+ * the write response / final notifications to the client before restart.
+ *
  * @return true if the update was finalized successfully, false otherwise.
  */
 bool ota_end(void);
@@ -73,59 +84,30 @@ bool ota_end(void);
 void ota_abort(void);
 
 /**
- * @brief Get the current running firmware version.
- * @return Pointer to a statically allocated version string.
- */
-const char* ota_get_current_version(void);
-
-/**
- * @brief Validate the integrity of the received firmware.
- * @return true if the firmware is valid, false otherwise.
- */
-bool ota_validate_firmware(void);
-
-/**
  * @brief Check if an OTA update is currently in progress.
  * @return true if an OTA update is active, false otherwise.
  */
 bool ota_is_in_progress(void);
 
 /**
- * @brief Get the number of bytes received so far.
- * @return Number of bytes already written.
+ * @brief Get the current running firmware version.
+ *
+ * Returns the version string from the app descriptor embedded in the
+ * running image (set via PROJECT_VER in the top-level CMakeLists.txt).
+ *
+ * @return Pointer to the version string (valid for the app lifetime).
  */
-size_t ota_get_bytes_received(void);
+const char* ota_get_current_version(void);
 
 /**
- * @brief Get the total expected firmware size.
- * @return Total size of the firmware (bytes).
+ * @brief Confirm the currently running image after an OTA update.
+ *
+ * With CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE, a freshly updated app boots
+ * in the PENDING_VERIFY state; unless it is marked valid, the bootloader
+ * rolls back to the previous image on the next reboot. Call this once at
+ * startup after the critical subsystems have initialized successfully.
  */
-size_t ota_get_total_size(void);
-
-// ============================================================================
-// OTA Event Emitters (for internal use)
-// ============================================================================
-
-/**
- * @brief Emit a status message via the registered status callback.
- * @param status   Status string.
- * @param is_error True if this is an error, false otherwise.
- */
-void ota_emit_status(const char* status, bool is_error);
-
-/**
- * @brief Emit a progress update via the registered progress callback.
- * @param received Bytes received so far.
- * @param total    Total expected bytes.
- */
-void ota_emit_progress(size_t received, size_t total);
-
-/**
- * @brief Emit a completion event via the registered completion callback.
- * @param success  True on success, false on failure.
- * @param message  Result message.
- */
-void ota_emit_complete(bool success, const char* message);
+void ota_confirm_running_image(void);
 
 #ifdef __cplusplus
 }

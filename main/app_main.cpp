@@ -212,6 +212,11 @@ extern "C" void app_main(void)
         on_virtual_limit,
         on_stealthchop,
         on_invert_dir);
+
+    // All critical subsystems are up: confirm the running image so the
+    // bootloader does not roll back to the previous firmware after an OTA
+    // update (CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE is set).
+    ota_confirm_running_image();
 }
 
 // -----------------------------------------------------------------------------
@@ -798,7 +803,7 @@ static void on_ota_control(const uint8_t* data, size_t len)
 
 static void on_ota_data(const uint8_t* data, size_t len)
 {
-    ota_write((uint8_t*)data, len);
+    ota_write(data, len);
 }
 
 static void ota_progress(size_t received, size_t total) {

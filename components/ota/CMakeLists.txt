@@ -1,10 +1,10 @@
 idf_component_register(
-    SRCS 
+    SRCS
         "src/ota.c"
-    INCLUDE_DIRS 
+    INCLUDE_DIRS
         "include"
-    REQUIRES
+    PRIV_REQUIRES
         app_update
-        esp_ota_ops
-        nvs_flash
+        esp_app_format
+        esp_timer
 )
