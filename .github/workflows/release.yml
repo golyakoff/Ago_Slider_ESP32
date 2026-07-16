@@ -1,4 +1,4 @@
-name: Build and Publish Firmware Release
+name: Firmware Build and Release
 
 on:
   push:
@@ -6,12 +6,13 @@ on:
       - 'v*.*.*'
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build:
     name: Build and Release
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
 
     steps:
       - name: Checkout code
@@ -35,48 +36,88 @@ jobs:
           target: esp32
           command: idf.py -B build_release -DSDKCONFIG=build_release/sdkconfig -DSDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.release" build
 
-      - name: Rename firmware binaries
+      - name: Get version from tag
+        id: get_version
+        run: echo "TAG_NAME=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Rename firmware files with meaningful names
         run: |
-          cp build_debug/ago_slider.bin ago_slider_debug_16mb_fw.bin
-          cp build_release/ago_slider.bin ago_slider_release_16mb_fw.bin
+          TAG="${{ steps.get_version.outputs.TAG_NAME }}"
 
-      - name: Read Changelog for current version
-        id: changelog
+          cp build_debug/ago_slider.bin                          "ago_slider_${TAG}_debug_16mb_fw.bin"
+          cp build_debug/partition_table/partition-table.bin     "ago_slider_${TAG}_debug_16mb_pt.bin"
+          cp build_debug/bootloader/bootloader.bin               "ago_slider_${TAG}_debug_16mb_bl.bin"
+          cp build_debug/ota_data_initial.bin                    "ago_slider_${TAG}_debug_16mb_od.bin"
+
+          cp build_release/ago_slider.bin                        "ago_slider_${TAG}_release_16mb_fw.bin"
+          cp build_release/partition_table/partition-table.bin   "ago_slider_${TAG}_release_16mb_pt.bin"
+          cp build_release/bootloader/bootloader.bin             "ago_slider_${TAG}_release_16mb_bl.bin"
+          cp build_release/ota_data_initial.bin                  "ago_slider_${TAG}_release_16mb_od.bin"
+
+      - name: List final artifacts
         run: |
-          VERSION=${GITHUB_REF_NAME#v}
-          CHANGELOG_FILE="CHANGELOG.md"
+          echo "=== Final firmware files ==="
+          ls -la *.bin
+          echo ""
+          echo "=== File sizes ==="
+          du -h *.bin
 
-          if [ ! -f "$CHANGELOG_FILE" ]; then
-            echo "content=Changelog file not found." >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
-          BLOCK=$(awk -v ver="$VERSION" '
-            BEGIN { found=0; output="" }
-            /^# Release / {
-              if (found) exit
-              if (index($0, ver) > 0) { found=1; next }
-            }
-            found { output = output $0 "\n" }
-            END { print output }
-          ' "$CHANGELOG_FILE")
-
-          BLOCK=$(echo "$BLOCK" | sed -e '/^[[:space:]]*$/d' -e '1{/^$/d}' -e '${/^$/d}')
-
-          if [ -z "$BLOCK" ]; then
-            BLOCK="No changelog section found for version $VERSION."
-          fi
-
-          echo 'content<<EOF' >> $GITHUB_OUTPUT
-          echo "$BLOCK" >> $GITHUB_OUTPUT
-          echo 'EOF' >> $GITHUB_OUTPUT
-
-      - name: Create Release and Upload Firmware
+      - name: Create Release
         uses: softprops/action-gh-release@v3
         with:
           files: |
-            ago_slider_debug_16mb_fw.bin
-            ago_slider_release_16mb_fw.bin
-          body: ${{ steps.changelog.outputs.content }}
+            ago_slider_${{ steps.get_version.outputs.TAG_NAME }}_debug_16mb_fw.bin
+            ago_slider_${{ steps.get_version.outputs.TAG_NAME }}_debug_16mb_pt.bin
+            ago_slider_${{ steps.get_version.outputs.TAG_NAME }}_debug_16mb_bl.bin
+            ago_slider_${{ steps.get_version.outputs.TAG_NAME }}_debug_16mb_od.bin
+            ago_slider_${{ steps.get_version.outputs.TAG_NAME }}_release_16mb_fw.bin
+            ago_slider_${{ steps.get_version.outputs.TAG_NAME }}_release_16mb_pt.bin
+            ago_slider_${{ steps.get_version.outputs.TAG_NAME }}_release_16mb_bl.bin
+            ago_slider_${{ steps.get_version.outputs.TAG_NAME }}_release_16mb_od.bin
+          tag_name: ${{ steps.get_version.outputs.TAG_NAME }}
+          name: Release ${{ steps.get_version.outputs.TAG_NAME }}
+          body: |
+            # AGO Slider ESP32 Firmware
+
+            **Version:** ${{ steps.get_version.outputs.TAG_NAME }}
+            **Build date:** ${{ github.event.head_commit.timestamp }}
+
+            ## Available Firmware Images
+
+            ### 🐞 Debug Version (verbose logging)
+            **16MB Flash:**
+            - `ago_slider_${{ steps.get_version.outputs.TAG_NAME }}_debug_16mb_fw.bin` - Firmware (application)
+            - `ago_slider_${{ steps.get_version.outputs.TAG_NAME }}_debug_16mb_pt.bin` - Partition table
+            - `ago_slider_${{ steps.get_version.outputs.TAG_NAME }}_debug_16mb_bl.bin` - Bootloader
+            - `ago_slider_${{ steps.get_version.outputs.TAG_NAME }}_debug_16mb_od.bin` - OTA data (initial)
+
+            ```bash
+            esptool.py --chip esp32 --baud 921600 write_flash --flash-mode dio --flash-size 16MB \
+            0x1000  ago_slider_${{ steps.get_version.outputs.TAG_NAME }}_debug_16mb_bl.bin \
+            0x8000  ago_slider_${{ steps.get_version.outputs.TAG_NAME }}_debug_16mb_pt.bin \
+            0xe000  ago_slider_${{ steps.get_version.outputs.TAG_NAME }}_debug_16mb_od.bin \
+            0x10000 ago_slider_${{ steps.get_version.outputs.TAG_NAME }}_debug_16mb_fw.bin
+            ```
+
+            ### 🚀 Production Version (optimized, -Os)
+            **16MB Flash:**
+            - `ago_slider_${{ steps.get_version.outputs.TAG_NAME }}_release_16mb_fw.bin` - Firmware (application)
+            - `ago_slider_${{ steps.get_version.outputs.TAG_NAME }}_release_16mb_pt.bin` - Partition table
+            - `ago_slider_${{ steps.get_version.outputs.TAG_NAME }}_release_16mb_bl.bin` - Bootloader
+            - `ago_slider_${{ steps.get_version.outputs.TAG_NAME }}_release_16mb_od.bin` - OTA data (initial)
+
+            ```bash
+            esptool.py --chip esp32 --baud 921600 write_flash --flash-mode dio --flash-size 16MB \
+            0x1000  ago_slider_${{ steps.get_version.outputs.TAG_NAME }}_release_16mb_bl.bin \
+            0x8000  ago_slider_${{ steps.get_version.outputs.TAG_NAME }}_release_16mb_pt.bin \
+            0xe000  ago_slider_${{ steps.get_version.outputs.TAG_NAME }}_release_16mb_od.bin \
+            0x10000 ago_slider_${{ steps.get_version.outputs.TAG_NAME }}_release_16mb_fw.bin
+            ```
+
+            ## Notes
+            - **Debug version** logs at DEBUG level over the serial port
+            - **Production version** is optimized for size (-Os), logs at INFO level
+            - The `*_fw.bin` (application) file is also what the Android app uploads over BLE OTA
+            - When flashing over cable, use all four images of the chosen variant at the offsets above
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

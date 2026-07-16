@@ -13,7 +13,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
-#include "tmc2130_HW_Abstraction.h"
+#include "tmc2130_hw_abstraction.h"
 #include "esp_err.h"
 
 
