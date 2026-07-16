@@ -719,6 +719,7 @@ static uint16_t handle_table[HRS_IDX_NB];
 static uint16_t conn_id = 0;
 static esp_gatt_if_t s_gatts_if = 0;
 static bool connected = false;
+static bool attr_table_ready = false;  // handle_table is only valid once the table is created
 
 // ----------------------------- Forward Declarations -------------------------------
 static void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if, esp_ble_gatts_cb_param_t *param);
@@ -751,6 +752,7 @@ static void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_
             }
             // Store handles
             memcpy(handle_table, param->add_attr_tab.handles, sizeof(handle_table));
+            attr_table_ready = true;
             // Start service
             esp_ble_gatts_start_service(handle_table[IDX_SVC]);
             // Start advertising
@@ -1417,22 +1419,25 @@ void ble_set_mot_en_state(uint8_t enable)
     esp_ble_gatts_set_attr_value(handle_table[IDX_CHAR_VAL_MOT_EN], 1, &enable);
 }
 
-// Set BATT_LEVEL characteristic value with notification
+// Set BATT_LEVEL characteristic value with notification.
+// The value is stored even while no client is connected: the battery level is
+// published only when it changes, so a client connecting later must be able to
+// read the last known level instead of the attribute's initial zero.
 void ble_set_battery_level(uint8_t percent) {
-    if (!connected)
+    if (!attr_table_ready)
         return;
 
     if (percent > 100)
         percent = 100;
-    
+
     uint8_t level = (uint8_t)(percent * 255 / 100);  // 0-100 → 0-255
-    
+
     esp_ble_gatts_set_attr_value(
         handle_table[IDX_CHAR_VAL_BATT_LEVEL],
         1,
         &level);
 
-    if (batt_level_notify) {
+    if (connected && batt_level_notify) {
         esp_ble_gatts_send_indicate(
             s_gatts_if,
             conn_id,

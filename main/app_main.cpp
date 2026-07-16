@@ -91,7 +91,7 @@ static PCA9555 pca9555;
 static bool ble_is_advertising = false;
 static bool ble_is_connected = false;
 
-static uint8_t last_batt_lvl_percent = 255;
+static uint8_t last_batt_lvl_percent = 255;  // 255 = no INA219 reading yet
 
 void init_tmc2130(const app_config_t *cfg);
 void init_fastAccelStepper(const app_config_t *cfg);
@@ -583,6 +583,13 @@ static void on_ble_start(void) {
 static void on_ble_connect(void) {
     ble_is_connected = true;
     ble_is_advertising = false;
+
+    // Both the INA219 (readings past a threshold) and the level check below report only on
+    // change, and the first reading is taken before the BLE stack is up, so on a steady supply
+    // nothing would ever reach a client: it would read 0% until the level happens to move.
+    // Re-publish the last known level so the fresh client can read it right away.
+    if (last_batt_lvl_percent <= 100)
+        ble_set_battery_level(last_batt_lvl_percent);
 }
 
 static void on_ble_disconnect(void) {
