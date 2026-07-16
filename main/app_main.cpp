@@ -93,6 +93,9 @@ static bool ble_is_connected = false;
 
 static uint8_t last_batt_lvl_percent = 255;  // 255 = no INA219 reading yet
 
+// Last known endstop states (X, C, B), kept across failed reads
+static bool s_limit_state[3] = {false, false, false};
+
 // Last INA219 reading, re-published when a client connects
 static float last_voltage = 0.0f;
 static float last_current = 0.0f;
@@ -120,6 +123,7 @@ static void on_ble_mot_en(bool enable);
 static void on_ble_home(bool home_x, bool home_c, bool home_b);
 static void on_ble_limit_read(bool *x, bool *c, bool *b);
 
+static bool read_limits(bool *x_limited, bool *c_limited, bool *b_limited);
 static void on_limit_change(uint8_t pin, bool value);
 
 static void on_home_progress(bool x_req, bool c_req, bool b_req, bool x_homed, bool c_homed, bool b_homed);
@@ -643,27 +647,50 @@ static void on_ble_move(int32_t x, int32_t c, int32_t b) {
     motion_move_relative(x, c, b);
 }
 
+// Reads all three endstops (active LOW → inverted). Returns false if any read fails, leaving
+// the outputs untouched: the caller must not publish a guess, because a wrong bit reads as an
+// axis that left its endstop while it is in fact still sitting on it.
+static bool read_limits(bool *x_limited, bool *c_limited, bool *b_limited) {
+    bool raw_x, raw_c, raw_b;
+    if (pca9555_get_gpio_value(&pca9555, PCA9555_ENDSTOP_X, &raw_x) != ESP_OK) return false;
+    if (pca9555_get_gpio_value(&pca9555, PCA9555_ENDSTOP_C, &raw_c) != ESP_OK) return false;
+    if (pca9555_get_gpio_value(&pca9555, PCA9555_ENDSTOP_B, &raw_b) != ESP_OK) return false;
+
+    *x_limited = !raw_x;
+    *c_limited = !raw_c;
+    *b_limited = !raw_b;
+    return true;
+}
+
 static void on_limit_change(uint8_t pin, bool value) {
     ESP_LOGI("PCA9555", "Endstop on pin %d changed it value to %d", pin, value);
 
     bool x, c, b;
-    pca9555_get_gpio_value(&pca9555, PCA9555_ENDSTOP_X, &x);
-    pca9555_get_gpio_value(&pca9555, PCA9555_ENDSTOP_C, &c);
-    pca9555_get_gpio_value(&pca9555, PCA9555_ENDSTOP_B, &b);
+    if (!read_limits(&x, &c, &b)) {
+        ESP_LOGW(TAG, "Endstop read failed, keeping the last known state");
+        return;
+    }
 
-    ble_set_limit(!x, !c, !b);
+    s_limit_state[0] = x;
+    s_limit_state[1] = c;
+    s_limit_state[2] = b;
+    ESP_LOGI("PCA9555", "Endstops now: X=%d C=%d B=%d", x, c, b);
+
+    ble_set_limit(x, c, b);
 }
 
 static void on_ble_limit_read(bool *x, bool *c, bool *b) {
-    bool raw_x, raw_c, raw_b;
+    bool read_x, read_c, read_b;
+    if (read_limits(&read_x, &read_c, &read_b)) {
+        s_limit_state[0] = read_x;
+        s_limit_state[1] = read_c;
+        s_limit_state[2] = read_b;
+    }
 
-    pca9555_get_gpio_value(&pca9555, PCA9555_ENDSTOP_X, &raw_x);
-    pca9555_get_gpio_value(&pca9555, PCA9555_ENDSTOP_C, &raw_c);
-    pca9555_get_gpio_value(&pca9555, PCA9555_ENDSTOP_B, &raw_b);
-
-    *x = !raw_x;
-    *c = !raw_c;
-    *b = !raw_b;
+    // A failed read says nothing about the endstops, so answer with the last known state
+    *x = s_limit_state[0];
+    *c = s_limit_state[1];
+    *b = s_limit_state[2];
 }
 
 static void on_home_progress(bool x_req, bool c_req, bool b_req, bool x_homed, bool c_homed, bool b_homed)
