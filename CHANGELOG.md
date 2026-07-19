@@ -1,3 +1,22 @@
+# Release 0.1.5
+
+- Axis speeds now mean what they say. The step interval was computed from 10^7 instead of
+  10^6, so every axis ran at a tenth of its configured speed; stored settings are rescaled
+  once on upgrade, keyed on a schema version kept in its own NVS entry.
+- Homing anchors an axis from the endstop interrupt instead of a 50 ms poll. On a moving
+  carriage the switch is a pulse of a few milliseconds, which the poll could only ever catch
+  by luck; the poll remains for the one case it still serves, an axis already sitting on its
+  switch when the run starts.
+- POSITION carries per-axis validity flags, so a coordinate now outlives the Bluetooth link:
+  a client can reconnect mid-session and trust it, while a zero left by a reboot can no
+  longer pass for a homed one.
+- Movement scenarios run entirely on the device (SCENARIO, 0xF007). A pass keeps going while
+  the phone is disconnected, closed or rebooting, and any client can read how far it got.
+  The first pattern keeps a subject centred by turning C while the carriage travels, with an
+  optional linear B tilt.
+- Moves can carry their own speed and acceleration, in millihertz, so a scenario axis can be
+  given a fraction of a step per second without the stored settings interfering.
+
 # Release 0.1.4
 
 - Hardware span calibration (CALIBRATE, 0xF006): the device seeks each end of an axis
