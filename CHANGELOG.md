@@ -1,3 +1,16 @@
+# Release 0.1.4
+
+- Hardware span calibration (CALIBRATE, 0xF006): the device seeks each end of an axis
+  fast, retreats, re-seeks slowly and parks at the commanded offset, reporting the
+  measured span. The endstop sensors are magnetic point triggers that blink for about
+  4 ms on a passing carriage, so the stops now happen on-device — a BLE-driven loop
+  could not catch them and would run the carriage into the hard stop.
+- New POSITION characteristic (0xF005): commanded positions for all three axes, zeroed
+  at the switch on homing and notified every 200 ms while moving.
+- Endstop events no longer go missing: only the PCA9555 interrupt task reads the input
+  registers, so nothing clears the INT latch behind its back.
+- MOVE now takes 32-bit step counts per axis instead of 16-bit.
+
 # Release 0.1.3
 
 - Homing fixes: endstop state is never published from a failed I2C read (last known state
