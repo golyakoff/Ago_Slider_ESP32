@@ -185,6 +185,22 @@ void motion_get_limits(bool *x_limited, bool *c_limited, bool *b_limited);
 void motion_get_positions(int32_t *x, int32_t *c, int32_t *b);
 
 /**
+ * @brief Read whether each axis's position still means something: true from the moment the
+ *        axis is zeroed at its endstop until the drivers are disabled or the board reboots.
+ *        With the motors off the carriage can be moved by hand, so the step count is no
+ *        longer a measurement.
+ * @param x pointer for X validity (may be NULL)
+ * @param c pointer for C validity (may be NULL)
+ * @param b pointer for B validity (may be NULL)
+ */
+void motion_get_home_valid(bool *x, bool *c, bool *b);
+
+/**
+ * @brief Drop the home reference on every axis. Call when holding torque is lost.
+ */
+void motion_invalidate_home(void);
+
+/**
  * @brief Emergency stop all motion.
  */
 void motion_emergency_stop(void);

@@ -102,6 +102,14 @@ static float last_current = 0.0f;
 static float last_power = 0.0f;
 static bool has_power_reading = false;
 
+// FastAccelStepper takes the MINIMUM STEP INTERVAL in microseconds, so a rate of
+// `sps` pulses per second is 1e6 / sps. Until firmware 0.1.5 this divided 1e7,
+// which made every axis run at a tenth of its configured speed; the stored
+// settings are scaled down once on upgrade (see nvs_config's schema migration).
+static inline uint32_t speed_sps_to_us(uint32_t sps) {
+    return (sps > 0) ? (1000000UL / sps) : 10000;
+}
+
 void init_tmc2130(const app_config_t *cfg);
 void init_fastAccelStepper(const app_config_t *cfg);
 
@@ -122,10 +130,11 @@ static void on_ble_move(int32_t x_speed, int32_t y_speed, int32_t z_speed);
 static void on_ble_mot_en(bool enable);
 static void on_ble_home(bool home_x, bool home_c, bool home_b);
 static void on_ble_limit_read(bool *x, bool *c, bool *b);
-static void on_ble_position_read(int32_t *x, int32_t *c, int32_t *b);
+static void on_ble_position_read(int32_t *x, int32_t *c, int32_t *b, uint8_t *valid_mask);
 static void on_ble_calibrate(uint8_t axis, int32_t park_offset, int32_t retreat_steps);
 static void on_calib_status(uint8_t axis, uint8_t phase, int32_t span_steps);
 static void position_publisher_task(void *arg);
+void publish_position(void);
 
 static bool read_limits(bool *x_limited, bool *c_limited, bool *b_limited);
 static void on_limit_change(uint8_t pin, bool value);
@@ -402,7 +411,7 @@ void init_fastAccelStepper(const app_config_t *cfg)
         stepper1->setEnablePin(STEPPERS_EN_IO); // Shared EN
         stepper1->setAutoEnable(false);         // Disable autoenable
 
-        stepper1->setSpeedInUs(((speed_x > 0) ? (10000000 / speed_x) : 10000));  // the parameter is us/step !!!
+        stepper1->setSpeedInUs(speed_sps_to_us(speed_x));
         stepper1->setAcceleration(accel_x);
 
         ESP_LOGI(TAG, "FastAccelStepper stepper #%d initialized!", AXIS_X_ID);
@@ -416,7 +425,7 @@ void init_fastAccelStepper(const app_config_t *cfg)
         stepper2->setEnablePin(STEPPERS_EN_IO); // Shared EN
         stepper2->setAutoEnable(false);         // Disable autoenable
         
-        stepper2->setSpeedInUs(((speed_c > 0) ? (10000000 / speed_c) : 10000));
+        stepper2->setSpeedInUs(speed_sps_to_us(speed_c));
         stepper2->setAcceleration(accel_c);
 
         ESP_LOGI(TAG, "FastAccelStepper stepper #%d initialized!", AXIS_C_ID);
@@ -430,7 +439,7 @@ void init_fastAccelStepper(const app_config_t *cfg)
         stepper3->setEnablePin(STEPPERS_EN_IO); // Shared EN
         stepper3->setAutoEnable(false);  
         
-        stepper3->setSpeedInUs(((speed_b > 0) ? (10000000 / speed_b) : 10000));
+        stepper3->setSpeedInUs(speed_sps_to_us(speed_b));
         stepper3->setAcceleration(accel_b);
 
         ESP_LOGI(TAG, "FastAccelStepper stepper #%d initialized!", AXIS_B_ID);
@@ -631,9 +640,7 @@ static void on_ble_connect(void) {
     ble_set_limit(x_limited, c_limited, b_limited);
 
     // And the positions, which are published only while something moves
-    int32_t x_pos, c_pos, b_pos;
-    motion_get_positions(&x_pos, &c_pos, &b_pos);
-    ble_set_position(x_pos, c_pos, b_pos);
+    publish_position();
 }
 
 static void on_ble_disconnect(void) {
@@ -648,7 +655,11 @@ static void on_ble_disconnect(void) {
 static void on_ble_mot_en(bool enable) {
     ESP_LOGI("Slider", "Set all motors %s", enable ? "enabled" : "disabled");
     motion_set_enable(enable);
+    // Without holding torque the carriage can be pushed by hand, so the counted position
+    // stops describing where the axis actually is — every axis needs homing again
+    if (!enable) motion_invalidate_home();
     ble_set_mot_en_state(enable);
+    publish_position();
 }
 
 static void on_ble_home(bool home_x, bool home_c, bool home_b) {
@@ -715,8 +726,11 @@ static void on_home_progress(bool x_req, bool c_req, bool b_req, bool x_homed, b
     ble_set_home_status(x_req, c_req, b_req, x_homed, c_homed, b_homed);
 }
 
-static void on_ble_position_read(int32_t *x, int32_t *c, int32_t *b) {
+static void on_ble_position_read(int32_t *x, int32_t *c, int32_t *b, uint8_t *valid_mask) {
     motion_get_positions(x, c, b);
+    bool vx, vc, vb;
+    motion_get_home_valid(&vx, &vc, &vb);
+    if (valid_mask) *valid_mask = (uint8_t)((vx ? 0x01 : 0) | (vc ? 0x02 : 0) | (vb ? 0x04 : 0));
 }
 
 static void on_ble_calibrate(uint8_t axis, int32_t park_offset, int32_t retreat_steps) {
@@ -736,16 +750,33 @@ static void on_calib_status(uint8_t axis, uint8_t phase, int32_t span_steps) {
  *        generators every 200 ms and notifies on change, plus one final notification
  *        when the axes come to rest so the client always ends on the exact position.
  */
+void publish_position(void) {
+    int32_t x, c, b;
+    bool vx, vc, vb;
+    motion_get_positions(&x, &c, &b);
+    motion_get_home_valid(&vx, &vc, &vb);
+    ble_set_position(x, c, b, (uint8_t)((vx ? 0x01 : 0) | (vc ? 0x02 : 0) | (vb ? 0x04 : 0)));
+}
+
 static void position_publisher_task(void *arg) {
     int32_t last_x = 0, last_c = 0, last_b = 0;
+    bool last_vx = false, last_vc = false, last_vb = false;
     while (1) {
         int32_t x, c, b;
+        bool vx, vc, vb;
         motion_get_positions(&x, &c, &b);
-        if (x != last_x || c != last_c || b != last_b) {
+        motion_get_home_valid(&vx, &vc, &vb);
+        // The validity flags are part of the payload, so a homing run that changes nothing
+        // but the flags still has to reach the client
+        if (x != last_x || c != last_c || b != last_b ||
+            vx != last_vx || vc != last_vc || vb != last_vb) {
             last_x = x;
             last_c = c;
             last_b = b;
-            ble_set_position(x, c, b);
+            last_vx = vx;
+            last_vc = vc;
+            last_vb = vb;
+            publish_position();
         }
         vTaskDelay(pdMS_TO_TICKS(200));
     }
@@ -793,9 +824,9 @@ static void on_units_per_step(float x, float c, float b) {
 static void on_axis_speed(uint16_t x, uint16_t c, uint16_t b) {
     ESP_LOGI(TAG, "Config: axis speed X=%u C=%u B=%u", x, c, b);
     nvs_config_set_axis_speed(x, c, b);
-    stepper1->setSpeedInUs(((x > 0) ? (10000000 / x) : 10000));
-    stepper2->setSpeedInUs(((c > 0) ? (10000000 / c) : 10000));
-    stepper3->setSpeedInUs(((b > 0) ? (10000000 / b) : 10000));
+    stepper1->setSpeedInUs(speed_sps_to_us(x));
+    stepper2->setSpeedInUs(speed_sps_to_us(c));
+    stepper3->setSpeedInUs(speed_sps_to_us(b));
 }
 
 static void on_axis_accel(uint16_t x, uint16_t c, uint16_t b) {

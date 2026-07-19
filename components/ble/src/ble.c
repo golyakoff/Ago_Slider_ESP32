@@ -32,7 +32,7 @@ enum {
 
     // Current position (notifiable)
     IDX_CHAR_POSITION,                   // POSITION declaration
-    IDX_CHAR_VAL_POSITION,               // POSITION value (12 bytes, 3x int32 LE steps)
+    IDX_CHAR_VAL_POSITION,               // POSITION value (13 bytes: 3x int32 LE steps + validity mask)
     IDX_CHAR_POSITION_CFG,               // POSITION CCCD
 
     // Hardware calibration (write + notify)
@@ -326,7 +326,7 @@ static const uint16_t character_client_config_uuid = ESP_GATT_UUID_CHAR_CLIENT_C
 // Default values for characteristics
 static const uint8_t move_default_val[12] = {0};
 static const uint8_t limit_default_val[1] = {0};
-static const uint8_t position_default_val[12] = {0};
+static const uint8_t position_default_val[13] = {0};
 static const uint8_t calib_default_val[9] = {0};
 
 static uint8_t microsteps_val[3] =      {16, 16, 16};                        // 1/16 for all axis
@@ -442,7 +442,7 @@ static const esp_gatts_attr_db_t gatt_db[HRS_IDX_NB] = {
     [IDX_CHAR_VAL_POSITION] = {
         {ESP_GATT_AUTO_RSP},
         {ESP_UUID_LEN_16, (uint8_t *)&position_char_uuid, ESP_GATT_PERM_READ,
-         12, sizeof(position_default_val), (uint8_t *)position_default_val}
+         13, sizeof(position_default_val), (uint8_t *)position_default_val}
     },
 
     // POSITION CCCD
@@ -1253,11 +1253,13 @@ static void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_
             }
             else if (handle == handle_table[IDX_CHAR_VAL_POSITION] && s_position_read_cb) {
                 int32_t x = 0, c = 0, b = 0;
-                s_position_read_cb(&x, &c, &b);
-                uint8_t buf[12];
+                uint8_t valid_mask = 0;
+                s_position_read_cb(&x, &c, &b, &valid_mask);
+                uint8_t buf[13];
                 memcpy(&buf[0], &x, 4);
                 memcpy(&buf[4], &c, 4);
                 memcpy(&buf[8], &b, 4);
+                buf[12] = valid_mask;
                 esp_ble_gatts_set_attr_value(handle_table[IDX_CHAR_VAL_POSITION], sizeof(buf), buf);
             }
             else if (handle == handle_table[IDX_CHAR_VAL_VERSION] && s_version_read_cb) {
@@ -1513,15 +1515,16 @@ void ble_set_limit(
 // ----------------------------- Send Position Notification --------------------------
 // Positions are little-endian on this target, so the int32 values can be copied as-is.
 // Stored while disconnected too, so a fresh client reads the last known positions.
-void ble_set_position(int32_t x, int32_t c, int32_t b)
+void ble_set_position(int32_t x, int32_t c, int32_t b, uint8_t valid_mask)
 {
     if (!attr_table_ready)
         return;
 
-    uint8_t buf[12];
+    uint8_t buf[13];
     memcpy(&buf[0], &x, 4);
     memcpy(&buf[4], &c, 4);
     memcpy(&buf[8], &b, 4);
+    buf[12] = valid_mask;
 
     esp_ble_gatts_set_attr_value(
         handle_table[IDX_CHAR_VAL_POSITION], sizeof(buf), buf);

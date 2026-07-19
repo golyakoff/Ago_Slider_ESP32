@@ -66,7 +66,7 @@ typedef void (*ble_limit_read_cb_t)(bool *x, bool *c, bool *b);
  * @brief Callback for POSITION characteristic read request.
  *        Should fill the current commanded positions in STEP pulses for X, C, B axes.
  */
-typedef void (*ble_position_read_cb_t)(int32_t *x, int32_t *c, int32_t *b);
+typedef void (*ble_position_read_cb_t)(int32_t *x, int32_t *c, int32_t *b, uint8_t *valid_mask);
 
 /**
  * @brief Callback for CALIBRATE characteristic write.
@@ -330,7 +330,7 @@ void ble_set_limit(bool x_limited, bool c_limited, bool b_limited);
  * @param c  current position of C axis in steps
  * @param b  current position of B axis in steps
  */
-void ble_set_position(int32_t x, int32_t c, int32_t b);
+void ble_set_position(int32_t x, int32_t c, int32_t b, uint8_t valid_mask);
 
 /**
  * @brief Publish hardware-calibration progress (characteristic CALIBRATE, notify).

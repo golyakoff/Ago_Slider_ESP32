@@ -27,6 +27,13 @@ static struct {
     .start_time_ms = 0
 };
 
+// Per-axis "this position means something" flag. Set when an axis is zeroed at its endstop,
+// cleared at boot and whenever the drivers lose holding torque — with the motors off the
+// carriage can be pushed by hand and the step count silently stops describing reality.
+// Published with POSITION so a client that reconnects mid-session can trust the coordinate
+// without re-homing, yet can never mistake a post-reboot zero for a homed one.
+static volatile bool s_home_valid[3] = {false, false, false};
+
 // Configuration storage
 static bool s_axis_deg[3] = {false, false, false};   // true = degrees, false = mm
 static float s_units_per_step[3] = {0.0f, 0.0f, 0.0f};
@@ -40,6 +47,20 @@ static void calib_task(void *arg);
 // -----------------------------------------------------------------------------
 // Private methods
 // -----------------------------------------------------------------------------
+
+/**
+ * @brief Anchor an axis at its endstop: stop it dead, make that point zero and mark the
+ *        coordinate trustworthy. Called both from the homing poll (axis already on the
+ *        switch) and from the endstop interrupt (switch met while moving).
+ */
+static void home_axis_at_switch(int axis)
+{
+    if (s_steppers[axis]) s_steppers[axis]->forceStopAndNewPosition(0);
+    s_homing.homed[axis] = true;
+    s_homing.requested[axis] = false;
+    s_home_valid[axis] = true;
+    ESP_LOGI(TAG, "Axis %c homed, position zeroed", "XCB"[axis]);
+}
 
 static void stop_all_axes(void) {
     for (int i = 0; i < 3; i++) {
@@ -101,12 +122,12 @@ static void homing_task(void *arg) {
         // moment its endstop is reached, so `requested` always means "still on
         // its way" — an axis that keeps the bit after homing ends never made it
         for (int i = 0; i < 3; i++) {
+            // This level check only catches an axis that is ALREADY sitting on its switch
+            // (a homing run started there ends immediately). A switch met while moving is
+            // a ~4 ms pulse that this 50 ms poll cannot see — that case is handled by
+            // motion_on_limit_pin_event() from the PCA9555 interrupt.
             if (s_homing.requested[i] && !s_homing.homed[i] && raw[i]) {
-                // Atomic stop + zero: the homed switch is the position anchor
-                if (s_steppers[i]) s_steppers[i]->forceStopAndNewPosition(0);
-                s_homing.homed[i] = true;
-                s_homing.requested[i] = false;
-                ESP_LOGI(TAG, "Axis %c homed, position zeroed", "XCB"[i]);
+                home_axis_at_switch(i);
             }
         }
 
@@ -344,6 +365,19 @@ void motion_abort_calibration(void)
     calib_finish(false);
 }
 
+void motion_get_home_valid(bool *x, bool *c, bool *b)
+{
+    if (x) *x = s_home_valid[0];
+    if (c) *c = s_home_valid[1];
+    if (b) *b = s_home_valid[2];
+}
+
+void motion_invalidate_home(void)
+{
+    for (int i = 0; i < 3; i++) s_home_valid[i] = false;
+    ESP_LOGI(TAG, "Home reference dropped on all axes");
+}
+
 void motion_on_limit_pin_event(uint8_t pin, bool raw)
 {
     if (raw) return; // endstops are active-low; only the activation edge matters
@@ -351,7 +385,17 @@ void motion_on_limit_pin_event(uint8_t pin, bool raw)
     for (int i = 0; i < 3; i++) {
         if (s_limit_pins[i] == pin) axis = i;
     }
-    if (axis < 0 || axis != s_calib.axis) return;
+    if (axis < 0) return;
+
+    // Homing: the switch is a millisecond-long pulse on a moving carriage, so the axis has
+    // to be anchored here, in the interrupt path. The 50 ms poll in homing_task only ever
+    // sees a switch that is already held down before the run starts.
+    if (s_homing.active && s_homing.requested[axis] && !s_homing.homed[axis]) {
+        home_axis_at_switch(axis);
+        return;
+    }
+
+    if (axis != s_calib.axis) return;
 
     portENTER_CRITICAL(&s_calib_mux);
     motion_calib_phase_t phase = s_calib.phase;

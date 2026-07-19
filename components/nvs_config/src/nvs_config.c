@@ -8,6 +8,14 @@ static const char *TAG = "NVS_CONFIG";
 static app_config_t s_config;
 static bool s_initialized = false;
 
+// Schema version of the stored settings. It lives in its own NVS key rather than
+// inside app_config_t on purpose: the loader below treats any change of
+// sizeof(app_config_t) as a corrupt blob and falls back to defaults, so growing
+// the struct would silently wipe every user's configuration on upgrade.
+// Devices written before versioning existed have no key at all and read as 0.
+#define CONFIG_SCHEMA_KEY     "cfg_ver"
+#define CONFIG_SCHEMA_VERSION 1
+
 // Default values (use app_config pack functions to fill)
 const app_config_t NVS_CONFIG_DEFAULT = {
     .microsteps = {16, 16, 16},
@@ -21,9 +29,12 @@ const app_config_t NVS_CONFIG_DEFAULT = {
     .units_per_step = {0x9A, 0x8F, 0x44, 0x3E,      // X axis: 0.19195 mm/step
                        0x9A, 0x99, 0x59, 0x3E,      // C axis: 0.2125 deg/step
                        0xE7, 0xD7, 0x95, 0x3E},     // B axis: 0.292682927 deg/step
-    .axis_speed = {1000 & 0xFF, (1000 >> 8) & 0xFF, // X: 1000 steps/sec
-                   1000 & 0xFF, (1000 >> 8) & 0xFF, // C: 1000 steps/sec
-                   1000 & 0xFF, (1000 >> 8) & 0xFF},// B: 1000 steps/sec
+    // Chosen to match what the hardware actually runs at: with 1/16 microstepping these
+    // are ~48 mm/s on X, ~53 deg/s on C and ~73 deg/s on B. The previous 1000 dated from
+    // the 10^7 speed bug, under which it meant a barely usable 1.2 mm/s on X.
+    .axis_speed = {4000 & 0xFF, (4000 >> 8) & 0xFF, // X: 4000 steps/sec
+                   4000 & 0xFF, (4000 >> 8) & 0xFF, // C: 4000 steps/sec
+                   4000 & 0xFF, (4000 >> 8) & 0xFF},// B: 4000 steps/sec
     .axis_accel = {2000 & 0xFF, (2000 >> 8) & 0xFF, // X: 2000 steps/sec²
                    2000 & 0xFF, (2000 >> 8) & 0xFF, // C: 2000 steps/sec²
                    2000 & 0xFF, (2000 >> 8) & 0xFF},// B: 2000 steps/sec²
@@ -53,6 +64,36 @@ static esp_err_t save_to_nvs(void)
     return err;
 }
 
+// v0 -> v1: axis speeds were stored while setSpeedInUs() was fed 1e7/speed instead
+// of 1e6/speed, so an axis really ran at a tenth of its setting and users tuned the
+// numbers ten times too high to compensate. Scale the stored values down so the
+// corrected formula reproduces the speed the hardware was actually doing.
+static void migrate_v0_to_v1(app_config_t *cfg)
+{
+    uint16_t x, c, b;
+    app_config_unpack_axis_speed(cfg, &x, &c, &b);
+    // Never let a rounded-down value reach 0: speed_sps_to_us() reads 0 as "invalid"
+    // and substitutes 100 pulses/s, which would speed such an axis up, not slow it.
+    uint16_t nx = (x >= 10) ? (x / 10) : 1;
+    uint16_t nc = (c >= 10) ? (c / 10) : 1;
+    uint16_t nb = (b >= 10) ? (b / 10) : 1;
+    app_config_pack_axis_speed(cfg, nx, nc, nb);
+    ESP_LOGW(TAG, "Schema v0->v1: axis speeds rescaled X %u->%u, C %u->%u, B %u->%u",
+             x, nx, c, nc, b, nb);
+}
+
+// Applies every migration between the stored schema version and the current one.
+// Returns true when the configuration was changed and needs saving.
+static bool migrate_config(uint8_t from_version, app_config_t *cfg)
+{
+    bool changed = false;
+    if (from_version < 1) {
+        migrate_v0_to_v1(cfg);
+        changed = true;
+    }
+    return changed;
+}
+
 esp_err_t nvs_config_init(void)
 {
     if (s_initialized) {
@@ -67,6 +108,7 @@ esp_err_t nvs_config_init(void)
         return err;
     }
 
+    bool needs_version_stamp = true;   // only a config loaded at the current version doesn't
     size_t size = sizeof(s_config);
     err = nvs_get_blob(nvs, "app_config", &s_config, &size);
     if (err == ESP_ERR_NVS_NOT_FOUND) {
@@ -92,8 +134,26 @@ esp_err_t nvs_config_init(void)
             nvs_commit(nvs);
         } else {
             ESP_LOGI(TAG, "Configuration loaded from NVS");
-            // optionally unpack and log
+            // Settings saved by an older firmware may need rewriting before use.
+            uint8_t stored_version = 0;   // absent key = the original, unversioned schema
+            if (nvs_get_u8(nvs, CONFIG_SCHEMA_KEY, &stored_version) != ESP_OK) {
+                stored_version = 0;
+            }
+            if (stored_version < CONFIG_SCHEMA_VERSION &&
+                migrate_config(stored_version, &s_config)) {
+                nvs_set_blob(nvs, "app_config", &s_config, sizeof(s_config));
+            }
+            needs_version_stamp = (stored_version != CONFIG_SCHEMA_VERSION);
         }
+    }
+
+    // Stamp the version on the paths that changed it: a migrated configuration, and a
+    // freshly defaulted one, which is already in the new format and must not be
+    // migrated on the next boot. Writing it unconditionally would touch flash on
+    // every single boot.
+    if (needs_version_stamp) {
+        nvs_set_u8(nvs, CONFIG_SCHEMA_KEY, CONFIG_SCHEMA_VERSION);
+        nvs_commit(nvs);
     }
 
     nvs_close(nvs);
