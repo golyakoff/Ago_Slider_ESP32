@@ -90,6 +90,28 @@ state. When adding a new persisted setting, all four places need updating togeth
 `app_config.h`, a BLE characteristic + callback in `ble.h`/`ble.c`, an `nvs_config_set_*`
 accessor, and the apply/init logic in `app_main.cpp`.
 
+### Position, endstop events and hardware calibration
+
+- POSITION (0xF005, read/notify) reports the step generators' commanded positions (3× int32 LE
+  STEP pulses); homing anchors an axis via `forceStopAndNewPosition(0)`, so the switch is the
+  firmware's zero. A publisher task in `app_main.cpp` notifies every 200 ms while anything moves.
+- **PCA9555 single-reader invariant**: the interrupt task in `components/pca9555` is the ONLY
+  code that reads the input registers; `pca9555_get_gpio_value()` serves inputs from its cached
+  `pin_state`. Any direct register read elsewhere would clear the PCA9555 INT latch behind the
+  task's back and desynchronise its change detection — that exact bug silently swallowed endstop
+  events for minutes. The task also re-reads on a 500 ms timeout as a lost-edge safety net.
+- The endstop sensors are magnetic and emit millisecond-long pulses on a passing carriage (a
+  ~4 ms blink was measured at 10 mm/s), so anything that must stop on a sensor has to react
+  on-device: `app_main`'s `on_limit_change` forwards every edge to
+  `motion_on_limit_pin_event()`.
+- CALIBRATE (0xF006, write/notify) runs the span measurement entirely in `motion`: fast seek to
+  the min switch → retreat → slow re-seek (position zeroed at the trigger) → fast seek to the
+  max switch → retreat → slow re-seek (span captured) → park at the commanded offset. Endstop
+  edges drive the stops (~1 ms latency); retreat/park phases ignore them by design; the
+  virtual-limit monitor is suppressed while calibrating; per-phase timeout 60 s. Write format:
+  axis byte (0xFF = abort) + park offset + retreat (int32 LE each); notify: axis, phase
+  (`motion_calib_phase_t`), span.
+
 ### Dependencies
 
 Managed components (`managed_components/`, pinned in `main/idf_component.yml` /

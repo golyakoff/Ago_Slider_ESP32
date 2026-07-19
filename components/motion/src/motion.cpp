@@ -32,6 +32,8 @@ static bool s_axis_deg[3] = {false, false, false};   // true = degrees, false = 
 static float s_units_per_step[3] = {0.0f, 0.0f, 0.0f};
 static bool s_virtual_limit_enabled[3] = {false, false, false};
 
+static void calib_task(void *arg);
+
 // The X carriage needs well over 30 s to cross the full rail at homing speed
 #define HOMING_TIMEOUT_MS   90000
 
@@ -61,6 +63,8 @@ static void monitor_limits_task(void *arg) {
         for (int i = 0; i < 3; i++) {
             if (!s_virtual_limit_enabled[i] || !lim[i] || !s_steppers[i]) continue;
             if (s_steppers[i]->getCurrentSpeedInMilliHz() >= 0) continue;
+            // The calibration state machine drives into the endstops on purpose
+            if (motion_is_calibrating()) continue;
             s_steppers[i]->forceStop();
             ESP_LOGI(TAG, "Virtual limit %c triggered, axis stopped", "XCB"[i]);
         }
@@ -98,10 +102,11 @@ static void homing_task(void *arg) {
         // its way" — an axis that keeps the bit after homing ends never made it
         for (int i = 0; i < 3; i++) {
             if (s_homing.requested[i] && !s_homing.homed[i] && raw[i]) {
-                if (s_steppers[i]) s_steppers[i]->forceStop();
+                // Atomic stop + zero: the homed switch is the position anchor
+                if (s_steppers[i]) s_steppers[i]->forceStopAndNewPosition(0);
                 s_homing.homed[i] = true;
                 s_homing.requested[i] = false;
-                ESP_LOGI(TAG, "Axis %c homed", "XCB"[i]);
+                ESP_LOGI(TAG, "Axis %c homed, position zeroed", "XCB"[i]);
             }
         }
 
@@ -163,6 +168,7 @@ void motion_init(FastAccelStepper* stepper_x,
 
     xTaskCreate(homing_task, "homing_monitor", 4096, nullptr, 1, nullptr);
     xTaskCreate(monitor_limits_task, "limit_monitor", 2048, nullptr, 1, nullptr);
+    xTaskCreate(calib_task, "calib_monitor", 4096, nullptr, 2, nullptr);
     ESP_LOGI(TAG, "Motion controller initialised");
 }
 
@@ -252,6 +258,217 @@ void motion_set_enable(bool enable)
     } else {
         ESP_LOGE(TAG, "Failed to %s motors: %s", enable ? "enable" : "disable", esp_err_to_name(ret));
     }
+}
+
+// -----------------------------------------------------------------------------
+// Hardware calibration state machine. Endstop events (motion_on_limit_pin_event,
+// called from the PCA9555 interrupt task) stop the seeks with ~1 ms latency and
+// advance the phase; the calibration task issues the next move once the stepper
+// is idle and watches the per-phase timeout. Events during retreat/park phases
+// are ignored by design — the retreats cross the sensor again on purpose.
+// -----------------------------------------------------------------------------
+#define CALIB_SEEK_STEPS        500000000  // "drive until the endstop answers"
+#define CALIB_SLOW_FACTOR       5          // slow re-seek at 1/5 of the axis speed
+#define CALIB_SLOW_SEEK_RETREATS 4         // slow seek bound, in retreat distances
+#define CALIB_PHASE_TIMEOUT_MS  60000
+
+static struct {
+    volatile motion_calib_phase_t phase;
+    uint8_t axis;
+    int32_t park_offset;
+    int32_t retreat;
+    int32_t span;
+    bool move_issued;
+    uint32_t phase_start_ms;
+    uint32_t saved_speed_us;
+} s_calib = {
+    .phase = MOTION_CALIB_IDLE,
+};
+
+static motion_calib_status_cb_t s_calib_cb = NULL;
+static portMUX_TYPE s_calib_mux = portMUX_INITIALIZER_UNLOCKED;
+
+void motion_set_calib_status_cb(motion_calib_status_cb_t cb)
+{
+    s_calib_cb = cb;
+}
+
+bool motion_is_calibrating(void)
+{
+    motion_calib_phase_t ph = s_calib.phase;
+    return ph != MOTION_CALIB_IDLE && ph != MOTION_CALIB_DONE && ph != MOTION_CALIB_FAILED;
+}
+
+// Sets the phase and notifies; the next move (if any) is issued by calib_task
+static void calib_set_phase(motion_calib_phase_t phase)
+{
+    s_calib.phase = phase;
+    s_calib.move_issued = false;
+    s_calib.phase_start_ms = esp_log_timestamp();
+    ESP_LOGI(TAG, "Calibration axis %c: phase %d", "XCB"[s_calib.axis], (int)phase);
+    if (s_calib_cb) s_calib_cb(s_calib.axis, (uint8_t)phase, s_calib.span);
+}
+
+static void calib_finish(bool ok)
+{
+    FastAccelStepper *st = s_steppers[s_calib.axis];
+    if (st) {
+        if (!ok) st->forceStop();
+        st->setSpeedInUs(s_calib.saved_speed_us);
+    }
+    calib_set_phase(ok ? MOTION_CALIB_DONE : MOTION_CALIB_FAILED);
+}
+
+void motion_start_calibration(uint8_t axis, int32_t park_offset_steps, int32_t retreat_steps)
+{
+    if (axis > 2 || !s_steppers[axis]) {
+        ESP_LOGW(TAG, "Calibration: invalid axis %u", axis);
+        return;
+    }
+    if (motion_is_calibrating() || s_homing.active) {
+        ESP_LOGW(TAG, "Calibration: busy, ignoring");
+        return;
+    }
+    s_calib.axis = axis;
+    s_calib.park_offset = park_offset_steps;
+    s_calib.retreat = (retreat_steps > 0) ? retreat_steps : 1000;
+    s_calib.span = 0;
+    s_calib.saved_speed_us = s_steppers[axis]->getSpeedInUs();
+    calib_set_phase(MOTION_CALIB_SEEK_MIN_FAST);
+}
+
+void motion_abort_calibration(void)
+{
+    if (!motion_is_calibrating()) return;
+    ESP_LOGW(TAG, "Calibration aborted");
+    calib_finish(false);
+}
+
+void motion_on_limit_pin_event(uint8_t pin, bool raw)
+{
+    if (raw) return; // endstops are active-low; only the activation edge matters
+    int axis = -1;
+    for (int i = 0; i < 3; i++) {
+        if (s_limit_pins[i] == pin) axis = i;
+    }
+    if (axis < 0 || axis != s_calib.axis) return;
+
+    portENTER_CRITICAL(&s_calib_mux);
+    motion_calib_phase_t phase = s_calib.phase;
+    bool acting = s_calib.move_issued;
+    portEXIT_CRITICAL(&s_calib_mux);
+    if (!acting) return;
+
+    FastAccelStepper *st = s_steppers[axis];
+    switch (phase) {
+        case MOTION_CALIB_SEEK_MIN_FAST:
+            st->forceStop();
+            calib_set_phase(MOTION_CALIB_RETREAT_MIN);
+            break;
+        case MOTION_CALIB_SEEK_MIN_SLOW:
+            // The min trigger is the position anchor
+            st->forceStopAndNewPosition(0);
+            calib_set_phase(MOTION_CALIB_SEEK_MAX_FAST);
+            break;
+        case MOTION_CALIB_SEEK_MAX_FAST:
+            st->forceStop();
+            calib_set_phase(MOTION_CALIB_RETREAT_MAX);
+            break;
+        case MOTION_CALIB_SEEK_MAX_SLOW:
+            st->forceStop();
+            s_calib.span = st->getCurrentPosition();
+            calib_set_phase(MOTION_CALIB_PARK);
+            break;
+        default:
+            break; // retreats and parking cross the sensor on purpose — ignore
+    }
+}
+
+static void calib_task(void *arg)
+{
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+        if (!motion_is_calibrating()) continue;
+
+        FastAccelStepper *st = s_steppers[s_calib.axis];
+        if (!st) continue;
+
+        if (esp_log_timestamp() - s_calib.phase_start_ms > CALIB_PHASE_TIMEOUT_MS) {
+            ESP_LOGE(TAG, "Calibration timeout in phase %d", (int)s_calib.phase);
+            calib_finish(false);
+            continue;
+        }
+        if (st->isRunning()) continue;
+
+        if (!s_calib.move_issued) {
+            // Stepper idle and the current phase's move not sent yet — issue it
+            switch (s_calib.phase) {
+                case MOTION_CALIB_SEEK_MIN_FAST:
+                    st->setSpeedInUs(s_calib.saved_speed_us);
+                    st->move(-CALIB_SEEK_STEPS);
+                    break;
+                case MOTION_CALIB_RETREAT_MIN:
+                    st->move(s_calib.retreat);
+                    break;
+                case MOTION_CALIB_SEEK_MIN_SLOW:
+                    st->setSpeedInUs(s_calib.saved_speed_us * CALIB_SLOW_FACTOR);
+                    st->move(-CALIB_SLOW_SEEK_RETREATS * s_calib.retreat);
+                    break;
+                case MOTION_CALIB_SEEK_MAX_FAST:
+                    st->setSpeedInUs(s_calib.saved_speed_us);
+                    st->move(CALIB_SEEK_STEPS);
+                    break;
+                case MOTION_CALIB_RETREAT_MAX:
+                    st->move(-s_calib.retreat);
+                    break;
+                case MOTION_CALIB_SEEK_MAX_SLOW:
+                    st->setSpeedInUs(s_calib.saved_speed_us * CALIB_SLOW_FACTOR);
+                    st->move(CALIB_SLOW_SEEK_RETREATS * s_calib.retreat);
+                    break;
+                case MOTION_CALIB_PARK:
+                    st->setSpeedInUs(s_calib.saved_speed_us);
+                    st->moveTo(s_calib.park_offset);
+                    break;
+                default:
+                    break;
+            }
+            portENTER_CRITICAL(&s_calib_mux);
+            s_calib.move_issued = true;
+            portEXIT_CRITICAL(&s_calib_mux);
+            continue;
+        }
+
+        // Stepper idle with the move already issued: the move ran to completion
+        switch (s_calib.phase) {
+            case MOTION_CALIB_RETREAT_MIN:
+                calib_set_phase(MOTION_CALIB_SEEK_MIN_SLOW);
+                break;
+            case MOTION_CALIB_RETREAT_MAX:
+                calib_set_phase(MOTION_CALIB_SEEK_MAX_SLOW);
+                break;
+            case MOTION_CALIB_PARK:
+                ESP_LOGI(TAG, "Calibration axis %c done: span=%ld steps",
+                         "XCB"[s_calib.axis], (long)s_calib.span);
+                calib_finish(true);
+                break;
+            case MOTION_CALIB_SEEK_MIN_SLOW:
+            case MOTION_CALIB_SEEK_MAX_SLOW:
+                // The bounded slow seek ended without the sensor answering
+                ESP_LOGE(TAG, "Calibration: endstop silent during slow seek");
+                calib_finish(false);
+                break;
+            default:
+                // A fast seek can only end via the endstop event or the timeout
+                break;
+        }
+    }
+}
+
+void motion_get_positions(int32_t *x, int32_t *c, int32_t *b)
+{
+    if (x) *x = s_steppers[0] ? s_steppers[0]->getCurrentPosition() : 0;
+    if (c) *c = s_steppers[1] ? s_steppers[1]->getCurrentPosition() : 0;
+    if (b) *b = s_steppers[2] ? s_steppers[2]->getCurrentPosition() : 0;
 }
 
 void motion_get_limits(bool *x_limited, bool *c_limited, bool *b_limited)

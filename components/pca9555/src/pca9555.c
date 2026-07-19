@@ -26,38 +26,47 @@ static esp_err_t i2c_write_reg(i2c_master_dev_handle_t dev_handle, uint8_t reg, 
     return i2c_master_transmit(dev_handle, buf, 2, -1);
 }
 
-// Interrupt task
+// How often the interrupt task re-reads the port even without an interrupt, as a
+// safety net against a lost INT edge
+#define PCA9555_RESYNC_MS 500
+
+// Interrupt task: the SINGLE hardware reader of the input registers. It wakes on the
+// INT semaphore (instant) or on the re-sync timeout, refreshes the cached pin state
+// and fires the per-pin handlers for every change. Keeping all input reads in this one
+// place is essential: a read anywhere else clears the PCA9555 interrupt latch behind
+// the task's back and lets the cached state drift out of phase, after which every
+// change that happens to match the stale cache is swallowed silently.
 static void pca9555_intr_task(void *arg)
 {
     PCA9555 *device = (PCA9555 *)arg;
     uint8_t data[2] = {0, 0};
 
     while (1) {
-        if (xSemaphoreTake(device->intr_trigger, portMAX_DELAY)) {
-            esp_err_t res = i2c_read_reg(device->device, PCA9555_REG_INPUT_0, data, 2);
-            if (res != ESP_OK) {
-                ESP_LOGE(TAG, "Failed to read input state");
-                continue;
-            }
+        // Read on wake-up AND on timeout — the timeout pass costs one I2C read and
+        // repairs any state a lost edge would otherwise hide forever
+        xSemaphoreTake(device->intr_trigger, pdMS_TO_TICKS(PCA9555_RESYNC_MS));
+        esp_err_t res = i2c_read_reg(device->device, PCA9555_REG_INPUT_0, data, 2);
+        if (res != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to read input state");
+            continue;
+        }
 
-            uint16_t current_state = data[0] | (data[1] << 8);
+        uint16_t current_state = data[0] | (data[1] << 8);
+        uint16_t previous_state = device->pin_state;
+        device->pin_state = current_state;
 
-            // Check for pin changes
-            for (uint8_t pin = 0; pin < 16; pin++) {
-                if ((current_state & (1 << pin)) != (device->pin_state & (1 << pin))) {
-                    bool value = (current_state & (1 << pin)) != 0;
-                    xSemaphoreTake(device->mux, portMAX_DELAY);
-                    pca9555_intr_t handler = device->intr_handler[pin];
-                    xSemaphoreGive(device->mux);
+        // Check for pin changes
+        for (uint8_t pin = 0; pin < 16; pin++) {
+            if ((current_state & (1 << pin)) != (previous_state & (1 << pin))) {
+                bool value = (current_state & (1 << pin)) != 0;
+                xSemaphoreTake(device->mux, portMAX_DELAY);
+                pca9555_intr_t handler = device->intr_handler[pin];
+                xSemaphoreGive(device->mux);
 
-                    if (handler != NULL) {
-                        handler(pin, value);
-                    }
+                if (handler != NULL) {
+                    handler(pin, value);
                 }
             }
-
-            vTaskDelay(10 / portTICK_PERIOD_MS);
-            device->pin_state = current_state;
         }
     }
 }
@@ -317,6 +326,15 @@ esp_err_t pca9555_get_gpio_value(PCA9555 *device, uint8_t pin, bool *value)
     esp_err_t res = pca9555_get_gpio_direction(device, pin, &direction);
     if (res != ESP_OK) {
         return res;
+    }
+
+    // Inputs are served from the interrupt task's cache: a direct register read here
+    // would clear the INT latch behind that task's back (losing the pending interrupt)
+    // and desynchronise its change detection. The cache is refreshed by the interrupt
+    // itself, i.e. faster than any polling caller needs.
+    if (direction == PCA9555_DIR_IN && device->intr_task_handle != NULL) {
+        *value = (device->pin_state >> pin) & 1;
+        return ESP_OK;
     }
 
     uint8_t reg;

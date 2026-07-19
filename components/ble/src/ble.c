@@ -30,6 +30,16 @@ enum {
     IDX_CHAR_VAL_LIMIT,                  // LIMIT value
     IDX_CHAR_LIMIT_CFG,                  // LIMIT CCCD
 
+    // Current position (notifiable)
+    IDX_CHAR_POSITION,                   // POSITION declaration
+    IDX_CHAR_VAL_POSITION,               // POSITION value (12 bytes, 3x int32 LE steps)
+    IDX_CHAR_POSITION_CFG,               // POSITION CCCD
+
+    // Hardware calibration (write + notify)
+    IDX_CHAR_CALIB,                      // CALIBRATE declaration
+    IDX_CHAR_VAL_CALIB,                  // CALIBRATE value (write: 9 bytes; notify: 6 bytes)
+    IDX_CHAR_CALIB_CFG,                  // CALIBRATE CCCD
+
     // Homing (notifiable)
     IDX_CHAR_HOME,                       // HOME declaration
     IDX_CHAR_VAL_HOME,                   // HOME value (read/write)
@@ -156,6 +166,19 @@ enum {
                                             // Notify: not used – the command is executed immediately.
                                             // Note: Speed and acceleration are pre‑configured or set via other characteristics.
 
+#define BLE_POSITION_CHAR_UUID      0xF005  // Current commanded position, 12 bytes (3 x int32 little‑endian):
+                                            //        Bytes 0-3: X, bytes 4-7: C, bytes 8-11: B, in STEP pulses.
+                                            //        An axis's position is reset to 0 the moment it completes homing.
+                                            // Read  : current positions.
+                                            // Notify: published periodically while any axis is moving.
+
+#define BLE_CALIB_CHAR_UUID         0xF006  // Hardware calibration command & status.
+                                            // Write : 9 bytes: axis (1 byte, 0=X/1=C/2=B, 0xFF=abort),
+                                            //        park offset (int32 LE, STEP pulses from the min trigger),
+                                            //        retreat distance (int32 LE, STEP pulses).
+                                            // Notify: 6 bytes: axis (1), phase (1, motion_calib_phase_t),
+                                            //        span (int32 LE, STEP pulses; valid from PARK phase on).
+
 #define BLE_BATT_LEVEL_CHAR_UUID    0xF020  // Battery level, 1 byte.
                                             // Read  : current battery level (0-255).
                                             //        Linear mapping: 0 corresponds to 18.0 V,
@@ -270,6 +293,8 @@ static const uint16_t mot_en_char_uuid = BLE_MOT_EN_CHAR_UUID;
 static const uint16_t home_char_uuid = BLE_HOME_CHAR_UUID;
 static const uint16_t limit_char_uuid = BLE_LIMIT_CHAR_UUID;
 static const uint16_t move_char_uuid = BLE_MOVE_CHAR_UUID;
+static const uint16_t position_char_uuid = BLE_POSITION_CHAR_UUID;
+static const uint16_t calib_char_uuid = BLE_CALIB_CHAR_UUID;
 
 static const uint16_t pwr_info_str_char_uuid = BLE_PWR_INFO_STR_CHAR_UUID;
 static const uint16_t pwr_info_char_uuid = BLE_PWR_INFO_CHAR_UUID;
@@ -301,6 +326,8 @@ static const uint16_t character_client_config_uuid = ESP_GATT_UUID_CHAR_CLIENT_C
 // Default values for characteristics
 static const uint8_t move_default_val[12] = {0};
 static const uint8_t limit_default_val[1] = {0};
+static const uint8_t position_default_val[12] = {0};
+static const uint8_t calib_default_val[9] = {0};
 
 static uint8_t microsteps_val[3] =      {16, 16, 16};                        // 1/16 for all axis
 static uint8_t run_current_val[6] =     {900 & 0xFF, (900 >> 8) & 0xFF,     // 900 mA for X
@@ -341,6 +368,8 @@ static ble_connect_cb_t s_connect_cb = NULL;
 static ble_disconnect_cb_t s_disconnect_cb = NULL;
 
 static ble_limit_read_cb_t s_limit_read_cb = NULL;
+static ble_position_read_cb_t s_position_read_cb = NULL;
+static ble_calibrate_cb_t s_calibrate_cb = NULL;
 static ble_mot_en_cb_t s_mot_en_cb = NULL;
 static ble_home_cmd_cb_t s_home_cmd_cb = NULL;
 static ble_move_cb_t s_move_cb = NULL;
@@ -362,6 +391,8 @@ static ble_ota_data_cb_t s_ota_data_cb = NULL;
 
 // CCCD enable states
 static bool limit_notify_enabled = false;
+static bool position_notify_enabled = false;
+static bool calib_notify_enabled = false;
 static bool home_notify_enabled = false;
 static bool batt_level_notify = false;
 static bool pwr_info_notify = false;
@@ -395,6 +426,48 @@ static const esp_gatts_attr_db_t gatt_db[HRS_IDX_NB] = {
 
     // LIMIT CCCD
     [IDX_CHAR_LIMIT_CFG] = {
+        {ESP_GATT_AUTO_RSP},
+        {ESP_UUID_LEN_16, (uint8_t *)&character_client_config_uuid, ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
+         sizeof(uint16_t), 2, (uint8_t *)"\x00\x00"}
+    },
+
+    // POSITION Characteristic Declaration
+    [IDX_CHAR_POSITION] = {
+        {ESP_GATT_AUTO_RSP},
+        {ESP_UUID_LEN_16, (uint8_t *)&character_declaration_uuid, ESP_GATT_PERM_READ,
+         char_declaration_size, char_declaration_size, (uint8_t *)&char_prop_rn}
+    },
+
+    // POSITION Characteristic Value
+    [IDX_CHAR_VAL_POSITION] = {
+        {ESP_GATT_AUTO_RSP},
+        {ESP_UUID_LEN_16, (uint8_t *)&position_char_uuid, ESP_GATT_PERM_READ,
+         12, sizeof(position_default_val), (uint8_t *)position_default_val}
+    },
+
+    // POSITION CCCD
+    [IDX_CHAR_POSITION_CFG] = {
+        {ESP_GATT_AUTO_RSP},
+        {ESP_UUID_LEN_16, (uint8_t *)&character_client_config_uuid, ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
+         sizeof(uint16_t), 2, (uint8_t *)"\x00\x00"}
+    },
+
+    // CALIBRATE Characteristic Declaration
+    [IDX_CHAR_CALIB] = {
+        {ESP_GATT_AUTO_RSP},
+        {ESP_UUID_LEN_16, (uint8_t *)&character_declaration_uuid, ESP_GATT_PERM_READ,
+         char_declaration_size, char_declaration_size, (uint8_t *)&char_prop_rwn}
+    },
+
+    // CALIBRATE Characteristic Value
+    [IDX_CHAR_VAL_CALIB] = {
+        {ESP_GATT_AUTO_RSP},
+        {ESP_UUID_LEN_16, (uint8_t *)&calib_char_uuid, ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
+         9, sizeof(calib_default_val), (uint8_t *)calib_default_val}
+    },
+
+    // CALIBRATE CCCD
+    [IDX_CHAR_CALIB_CFG] = {
         {ESP_GATT_AUTO_RSP},
         {ESP_UUID_LEN_16, (uint8_t *)&character_client_config_uuid, ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
          sizeof(uint16_t), 2, (uint8_t *)"\x00\x00"}
@@ -952,6 +1025,22 @@ static void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_
                     esp_ble_gatts_send_response(gatts_if, param->write.conn_id, param->write.trans_id, ESP_GATT_OK, NULL);
                 }
             }
+            // Handle CALIBRATE command write
+            else if (handle == handle_table[IDX_CHAR_VAL_CALIB]) {
+                if (param->write.len >= 9 && s_calibrate_cb) {
+                    uint8_t axis = param->write.value[0];
+                    int32_t park, retreat;
+                    memcpy(&park, &param->write.value[1], 4);
+                    memcpy(&retreat, &param->write.value[5], 4);
+                    ESP_LOGI(TAG, "Calibrate: axis=%u park=%ld retreat=%ld", axis, (long)park, (long)retreat);
+                    s_calibrate_cb(axis, park, retreat);
+                } else if (param->write.len >= 1 && param->write.value[0] == 0xFF && s_calibrate_cb) {
+                    // Short-form abort
+                    s_calibrate_cb(0xFF, 0, 0);
+                } else {
+                    ESP_LOGW(TAG, "Calibrate write length %d (expected 9)", param->write.len);
+                }
+            }
             // Handle CFG Virtual limit write
             else if (handle == handle_table[IDX_CHAR_VAL_VIRTUAL_LIMIT]) {
                 if (param->write.len == 1) {
@@ -1067,6 +1156,26 @@ static void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_
                     esp_ble_gatts_send_response(gatts_if, param->write.conn_id, param->write.trans_id, ESP_GATT_OK, NULL);
                 }
             }
+            // Handle CCCD for POSITION
+            else if (param->write.handle == handle_table[IDX_CHAR_POSITION_CFG]) {
+                if (param->write.len == 2) {
+                    position_notify_enabled = (param->write.value[0] == 0x01);
+                    ESP_LOGI(TAG, "POSITION notifications %s", position_notify_enabled ? "enabled" : "disabled");
+                }
+                if (param->write.need_rsp) {
+                    esp_ble_gatts_send_response(gatts_if, param->write.conn_id, param->write.trans_id, ESP_GATT_OK, NULL);
+                }
+            }
+            // Handle CCCD for CALIBRATE
+            else if (param->write.handle == handle_table[IDX_CHAR_CALIB_CFG]) {
+                if (param->write.len == 2) {
+                    calib_notify_enabled = (param->write.value[0] == 0x01);
+                    ESP_LOGI(TAG, "CALIBRATE notifications %s", calib_notify_enabled ? "enabled" : "disabled");
+                }
+                if (param->write.need_rsp) {
+                    esp_ble_gatts_send_response(gatts_if, param->write.conn_id, param->write.trans_id, ESP_GATT_OK, NULL);
+                }
+            }
             // Handle CCCD for HOME
             else if (param->write.handle == handle_table[IDX_CHAR_HOME_CFG]) {
                 if (param->write.len == 2) {
@@ -1141,6 +1250,15 @@ static void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_
                 s_limit_read_cb(&x, &c, &b);
                 uint8_t limit_mask = (x ? 1 : 0) | (c ? 2 : 0) | (b ? 4 : 0);
                 esp_ble_gatts_set_attr_value(handle_table[IDX_CHAR_VAL_LIMIT], 1, &limit_mask);
+            }
+            else if (handle == handle_table[IDX_CHAR_VAL_POSITION] && s_position_read_cb) {
+                int32_t x = 0, c = 0, b = 0;
+                s_position_read_cb(&x, &c, &b);
+                uint8_t buf[12];
+                memcpy(&buf[0], &x, 4);
+                memcpy(&buf[4], &c, 4);
+                memcpy(&buf[8], &b, 4);
+                esp_ble_gatts_set_attr_value(handle_table[IDX_CHAR_VAL_POSITION], sizeof(buf), buf);
             }
             else if (handle == handle_table[IDX_CHAR_VAL_VERSION] && s_version_read_cb) {
                 const char *ver = s_version_read_cb();
@@ -1217,6 +1335,8 @@ void ble_init(
     ble_home_cmd_cb_t home_cmd_cb,
     ble_move_cb_t move_cb,
     ble_limit_read_cb_t limit_read_cb,
+    ble_position_read_cb_t position_read_cb,
+    ble_calibrate_cb_t calibrate_cb,
     ble_microsteps_cb_t microsteps_cb,
     ble_run_current_cb_t run_current_cb,
     ble_hold_current_cb_t hold_current_cb,
@@ -1240,6 +1360,8 @@ void ble_init(
     s_home_cmd_cb = home_cmd_cb;
     s_move_cb = move_cb;
     s_limit_read_cb = limit_read_cb;
+    s_position_read_cb = position_read_cb;
+    s_calibrate_cb = calibrate_cb;
     
     s_microsteps_cb = microsteps_cb;
     s_run_current_cb = run_current_cb;
@@ -1384,6 +1506,58 @@ void ble_set_limit(
             handle_table[IDX_CHAR_VAL_LIMIT],
             sizeof(limit_mask),
             &limit_mask,
+            false);
+    }
+}
+
+// ----------------------------- Send Position Notification --------------------------
+// Positions are little-endian on this target, so the int32 values can be copied as-is.
+// Stored while disconnected too, so a fresh client reads the last known positions.
+void ble_set_position(int32_t x, int32_t c, int32_t b)
+{
+    if (!attr_table_ready)
+        return;
+
+    uint8_t buf[12];
+    memcpy(&buf[0], &x, 4);
+    memcpy(&buf[4], &c, 4);
+    memcpy(&buf[8], &b, 4);
+
+    esp_ble_gatts_set_attr_value(
+        handle_table[IDX_CHAR_VAL_POSITION], sizeof(buf), buf);
+
+    if (connected && position_notify_enabled) {
+        esp_ble_gatts_send_indicate(
+            s_gatts_if,
+            conn_id,
+            handle_table[IDX_CHAR_VAL_POSITION],
+            sizeof(buf),
+            buf,
+            false);
+    }
+}
+
+// ----------------------------- Send Calibration Status -----------------------------
+void ble_set_calib_status(uint8_t axis, uint8_t phase, int32_t span_steps)
+{
+    if (!attr_table_ready)
+        return;
+
+    uint8_t buf[6];
+    buf[0] = axis;
+    buf[1] = phase;
+    memcpy(&buf[2], &span_steps, 4);
+
+    esp_ble_gatts_set_attr_value(
+        handle_table[IDX_CHAR_VAL_CALIB], sizeof(buf), buf);
+
+    if (connected && calib_notify_enabled) {
+        esp_ble_gatts_send_indicate(
+            s_gatts_if,
+            conn_id,
+            handle_table[IDX_CHAR_VAL_CALIB],
+            sizeof(buf),
+            buf,
             false);
     }
 }

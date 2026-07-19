@@ -122,6 +122,10 @@ static void on_ble_move(int32_t x_speed, int32_t y_speed, int32_t z_speed);
 static void on_ble_mot_en(bool enable);
 static void on_ble_home(bool home_x, bool home_c, bool home_b);
 static void on_ble_limit_read(bool *x, bool *c, bool *b);
+static void on_ble_position_read(int32_t *x, int32_t *c, int32_t *b);
+static void on_ble_calibrate(uint8_t axis, int32_t park_offset, int32_t retreat_steps);
+static void on_calib_status(uint8_t axis, uint8_t phase, int32_t span_steps);
+static void position_publisher_task(void *arg);
 
 static bool read_limits(bool *x_limited, bool *c_limited, bool *b_limited);
 static void on_limit_change(uint8_t pin, bool value);
@@ -199,6 +203,7 @@ extern "C" void app_main(void)
         PCA9555_ENDSTOP_C,
         PCA9555_ENDSTOP_B,
         on_home_progress);
+    motion_set_calib_status_cb(on_calib_status);
 
     // Initialize BLE (everything inside)
     ble_init(
@@ -213,6 +218,8 @@ extern "C" void app_main(void)
         on_ble_home,
         on_ble_move,
         on_ble_limit_read,
+        on_ble_position_read,
+        on_ble_calibrate,
         on_microsteps,
         on_run_current,
         on_hold_current,
@@ -223,6 +230,9 @@ extern "C" void app_main(void)
         on_virtual_limit,
         on_stealthchop,
         on_invert_dir);
+
+    // Publishes POSITION notifications while the axes move
+    xTaskCreate(position_publisher_task, "position_pub", 2048, NULL, 1, NULL);
 
     // All critical subsystems are up: confirm the running image so the
     // bootloader does not roll back to the previous firmware after an OTA
@@ -619,6 +629,11 @@ static void on_ble_connect(void) {
     bool x_limited, c_limited, b_limited;
     on_ble_limit_read(&x_limited, &c_limited, &b_limited);
     ble_set_limit(x_limited, c_limited, b_limited);
+
+    // And the positions, which are published only while something moves
+    int32_t x_pos, c_pos, b_pos;
+    motion_get_positions(&x_pos, &c_pos, &b_pos);
+    ble_set_position(x_pos, c_pos, b_pos);
 }
 
 static void on_ble_disconnect(void) {
@@ -663,6 +678,8 @@ static bool read_limits(bool *x_limited, bool *c_limited, bool *b_limited) {
 }
 
 static void on_limit_change(uint8_t pin, bool value) {
+    // Feed the hardware-calibration state machine (~1 ms reaction to endstop edges)
+    motion_on_limit_pin_event(pin, value);
     ESP_LOGI("PCA9555", "Endstop on pin %d changed it value to %d", pin, value);
 
     bool x, c, b;
@@ -696,6 +713,42 @@ static void on_ble_limit_read(bool *x, bool *c, bool *b) {
 static void on_home_progress(bool x_req, bool c_req, bool b_req, bool x_homed, bool c_homed, bool b_homed)
 {
     ble_set_home_status(x_req, c_req, b_req, x_homed, c_homed, b_homed);
+}
+
+static void on_ble_position_read(int32_t *x, int32_t *c, int32_t *b) {
+    motion_get_positions(x, c, b);
+}
+
+static void on_ble_calibrate(uint8_t axis, int32_t park_offset, int32_t retreat_steps) {
+    if (axis == 0xFF) {
+        motion_abort_calibration();
+    } else {
+        motion_start_calibration(axis, park_offset, retreat_steps);
+    }
+}
+
+static void on_calib_status(uint8_t axis, uint8_t phase, int32_t span_steps) {
+    ble_set_calib_status(axis, phase, span_steps);
+}
+
+/**
+ * @brief Publishes the POSITION characteristic while anything moves: polls the step
+ *        generators every 200 ms and notifies on change, plus one final notification
+ *        when the axes come to rest so the client always ends on the exact position.
+ */
+static void position_publisher_task(void *arg) {
+    int32_t last_x = 0, last_c = 0, last_b = 0;
+    while (1) {
+        int32_t x, c, b;
+        motion_get_positions(&x, &c, &b);
+        if (x != last_x || c != last_c || b != last_b) {
+            last_x = x;
+            last_c = c;
+            last_b = b;
+            ble_set_position(x, c, b);
+        }
+        vTaskDelay(pdMS_TO_TICKS(200));
+    }
 }
 
 // -----------------------------------------------------------------------------

@@ -60,7 +60,9 @@ All characteristics use 16‑bit UUIDs.
 | 0xF001 | MOT_EN           | Read / Write          | Enable all motors (1=on, 0=off) |
 | 0xF002 | HOME             | Read / Write / Notify | Homing command & status (see byte format below) |
 | 0xF003 | LIMIT            | Read / Notify         | Current limit switch states (bits 0‑2: X, C, B) |
-| 0xF004 | MOVE             | Write                 | Relative move: 6 bytes (3× int16 little‑endian: X, C, B steps) |
+| 0xF004 | MOVE             | Write                 | Relative move: 12 bytes (3× int32 little‑endian: X, C, B steps) |
+| 0xF005 | POSITION         | Read / Notify         | Current commanded position: 12 bytes (3× int32 little‑endian: X, C, B step pulses). An axis resets to 0 the moment it completes homing. Notified every 200 ms while moving |
+| 0xF006 | CALIBRATE        | Write / Notify        | Hardware span calibration. Write 9 bytes: axis (0=X,1=C,2=B; 0xFF=abort), park offset (int32 LE, steps from the min trigger), retreat (int32 LE, steps). Notify 6 bytes: axis, phase (motion_calib_phase_t), span (int32 LE, valid from PARK). Position is zeroed at the min trigger during the sequence |
 
 #### Power Monitoring
 

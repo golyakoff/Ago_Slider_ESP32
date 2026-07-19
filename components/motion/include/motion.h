@@ -96,6 +96,63 @@ void motion_set_virtual_limit(bool x_en, bool c_en, bool b_en);
  */
 void motion_start_homing(bool home_x, bool home_c, bool home_b);
 
+// -----------------------------------------------------------------------------
+// Hardware calibration: measures an axis's endstop-to-endstop span entirely
+// on-device, reacting to endstop events with ~1 ms latency (the sensors emit
+// millisecond blinks that a BLE-driven loop cannot catch in time).
+// Sequence: fast seek to the min endstop -> retreat -> slow re-seek (position
+// zeroed at the trigger) -> fast seek to the max endstop -> retreat -> slow
+// re-seek (span captured) -> park at the given offset.
+// -----------------------------------------------------------------------------
+
+/** Calibration phases reported via the status callback. */
+typedef enum {
+    MOTION_CALIB_IDLE = 0,
+    MOTION_CALIB_SEEK_MIN_FAST,
+    MOTION_CALIB_RETREAT_MIN,
+    MOTION_CALIB_SEEK_MIN_SLOW,
+    MOTION_CALIB_SEEK_MAX_FAST,
+    MOTION_CALIB_RETREAT_MAX,
+    MOTION_CALIB_SEEK_MAX_SLOW,
+    MOTION_CALIB_PARK,
+    MOTION_CALIB_DONE,
+    MOTION_CALIB_FAILED,
+} motion_calib_phase_t;
+
+/**
+ * @brief Calibration progress callback.
+ * @param axis        0=X, 1=C, 2=B
+ * @param phase       current motion_calib_phase_t
+ * @param span_steps  measured min-to-max span in STEP pulses (valid from PARK on)
+ */
+typedef void (*motion_calib_status_cb_t)(uint8_t axis, uint8_t phase, int32_t span_steps);
+
+/** @brief Register the calibration status callback (may be NULL). */
+void motion_set_calib_status_cb(motion_calib_status_cb_t cb);
+
+/**
+ * @brief Start hardware calibration of one axis.
+ * @param axis               0=X, 1=C, 2=B
+ * @param park_offset_steps  where to park when done, in STEP pulses from the min trigger
+ * @param retreat_steps      how far to back off an endstop before the slow re-seek
+ */
+void motion_start_calibration(uint8_t axis, int32_t park_offset_steps, int32_t retreat_steps);
+
+/** @brief Abort a running calibration (force-stops the axis). */
+void motion_abort_calibration(void);
+
+/** @brief True while a calibration sequence is running. */
+bool motion_is_calibrating(void);
+
+/**
+ * @brief Feed an endstop pin event (from the PCA9555 interrupt path) into the
+ *        calibration state machine. Safe to call for any pin; non-endstop pins
+ *        and inactive phases are ignored.
+ * @param pin  PCA9555 pin number
+ * @param raw  raw pin level (endstops are active-low)
+ */
+void motion_on_limit_pin_event(uint8_t pin, bool raw);
+
 /**
  * @brief Move axes by relative distances (steps).
  * @param x steps (positive = forward, negative = backward)
@@ -117,6 +174,15 @@ void motion_set_enable(bool enable);
  * @param b_limited pointer to bool for B (may be NULL)
  */
 void motion_get_limits(bool *x_limited, bool *c_limited, bool *b_limited);
+
+/**
+ * @brief Read current positions in STEP pulses, as counted by the step generator.
+ *        An axis's position is reset to 0 the moment it completes homing.
+ * @param x pointer for X position (may be NULL)
+ * @param c pointer for C position (may be NULL)
+ * @param b pointer for B position (may be NULL)
+ */
+void motion_get_positions(int32_t *x, int32_t *c, int32_t *b);
 
 /**
  * @brief Emergency stop all motion.

@@ -62,6 +62,20 @@ typedef void (*ble_move_cb_t)(int32_t x, int32_t c, int32_t b);
  */
 typedef void (*ble_limit_read_cb_t)(bool *x, bool *c, bool *b);
 
+/**
+ * @brief Callback for POSITION characteristic read request.
+ *        Should fill the current commanded positions in STEP pulses for X, C, B axes.
+ */
+typedef void (*ble_position_read_cb_t)(int32_t *x, int32_t *c, int32_t *b);
+
+/**
+ * @brief Callback for CALIBRATE characteristic write.
+ * @param axis           0=X, 1=C, 2=B; 0xFF = abort the running calibration
+ * @param park_offset    park position in STEP pulses from the min trigger
+ * @param retreat_steps  endstop back-off distance in STEP pulses
+ */
+typedef void (*ble_calibrate_cb_t)(uint8_t axis, int32_t park_offset, int32_t retreat_steps);
+
 // ============================================================================
 // Callback types for configuration
 // ============================================================================
@@ -191,6 +205,7 @@ typedef void (*ble_ota_data_cb_t)(const uint8_t* data, size_t len);
  * @param home_cmd_cb           Called when HOME characteristic is written (byte with bits 4-6)
  * @param move_cb               Called when MOVE characteristic is written (6 bytes: X,C,B int16)
  * @param limit_read_cb         Called when LIMIT characteristic is read; should fill X,C,B limit flags
+ * @param position_read_cb      Called when POSITION characteristic is read; should fill X,C,B positions (int32 steps)
  * @param microsteps_cb         Called when MICROSTEPS characteristic is written (3 bytes)
  * @param run_current_cb        Called when RUN_CURRENT characteristic is written (3x uint16 mA)
  * @param hold_current_cb       Called when HOLD_CURRENT characteristic is written (3x uint16 mA)
@@ -214,6 +229,8 @@ void ble_init(
     ble_home_cmd_cb_t home_cmd_cb,
     ble_move_cb_t move_cb,
     ble_limit_read_cb_t limit_read_cb,
+    ble_position_read_cb_t position_read_cb,
+    ble_calibrate_cb_t calibrate_cb,
     ble_microsteps_cb_t microsteps_cb,
     ble_run_current_cb_t run_current_cb,
     ble_hold_current_cb_t hold_current_cb,
@@ -304,6 +321,24 @@ void ble_set_virtual_limit_value(bool x_en, bool c_en, bool b_en);
  * @param b_limited  true if B axis limit reached
  */
 void ble_set_limit(bool x_limited, bool c_limited, bool b_limited);
+
+/**
+ * @brief Update the POSITION characteristic (3x int32 little-endian, STEP pulses) and send
+ *        a notification if the client has subscribed. An axis's position is reset to 0 by
+ *        the motion module when the axis completes homing.
+ * @param x  current position of X axis in steps
+ * @param c  current position of C axis in steps
+ * @param b  current position of B axis in steps
+ */
+void ble_set_position(int32_t x, int32_t c, int32_t b);
+
+/**
+ * @brief Publish hardware-calibration progress (characteristic CALIBRATE, notify).
+ * @param axis        0=X, 1=C, 2=B
+ * @param phase       motion_calib_phase_t value
+ * @param span_steps  measured endstop-to-endstop span in STEP pulses (valid from PARK on)
+ */
+void ble_set_calib_status(uint8_t axis, uint8_t phase, int32_t span_steps);
 
 /**
  * @brief Send homing progress update (notification on HOME characteristic)
