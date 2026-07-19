@@ -2,6 +2,7 @@
 #define __BLE_H__
 
 #include <stdint.h>
+#include <stddef.h>
 #include <stdbool.h>
 
 #ifdef __cplusplus
@@ -75,6 +76,22 @@ typedef void (*ble_position_read_cb_t)(int32_t *x, int32_t *c, int32_t *b, uint8
  * @param retreat_steps  endstop back-off distance in STEP pulses
  */
 typedef void (*ble_calibrate_cb_t)(uint8_t axis, int32_t park_offset, int32_t retreat_steps);
+
+/**
+ * @brief Scenario command. One framing serves every movement pattern: the id selects the
+ *        pattern and the payload is whatever that pattern defines, so adding a pattern needs
+ *        no change here or in the client's transport.
+ * @param cmd         0x01 start, 0x02 stop
+ * @param scenario_id which pattern to run
+ * @param payload     scenario-specific parameters (duration first, then the pattern's own)
+ */
+typedef void (*ble_scenario_cb_t)(uint8_t cmd, uint8_t scenario_id,
+                                  const uint8_t *payload, size_t len);
+
+/** @brief Fill the current scenario status when a client reads the characteristic. */
+typedef void (*ble_scenario_status_read_cb_t)(uint8_t *scenario_id, uint8_t *state,
+                                              uint8_t *reason, uint32_t *elapsed_ms,
+                                              uint32_t *total_ms);
 
 // ============================================================================
 // Callback types for configuration
@@ -231,6 +248,8 @@ void ble_init(
     ble_limit_read_cb_t limit_read_cb,
     ble_position_read_cb_t position_read_cb,
     ble_calibrate_cb_t calibrate_cb,
+    ble_scenario_cb_t scenario_cb,
+    ble_scenario_status_read_cb_t scenario_status_read_cb,
     ble_microsteps_cb_t microsteps_cb,
     ble_run_current_cb_t run_current_cb,
     ble_hold_current_cb_t hold_current_cb,
@@ -339,6 +358,13 @@ void ble_set_position(int32_t x, int32_t c, int32_t b, uint8_t valid_mask);
  * @param span_steps  measured endstop-to-endstop span in STEP pulses (valid from PARK on)
  */
 void ble_set_calib_status(uint8_t axis, uint8_t phase, int32_t span_steps);
+
+/**
+ * @brief Publish scenario status. The layout is identical for every pattern, so a client can
+ *        follow a run it does not understand.
+ */
+void ble_set_scenario_status(uint8_t scenario_id, uint8_t state, uint8_t reason,
+                             uint32_t elapsed_ms, uint32_t total_ms);
 
 /**
  * @brief Send homing progress update (notification on HOME characteristic)

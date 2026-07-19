@@ -15,6 +15,7 @@
 #include "ble.h"
 #include "ota.h"
 #include "motion.h"
+#include "motion_scenario.h"
 #include "app_config.h"
 #include "nvs_config.h"
 
@@ -133,6 +134,11 @@ static void on_ble_limit_read(bool *x, bool *c, bool *b);
 static void on_ble_position_read(int32_t *x, int32_t *c, int32_t *b, uint8_t *valid_mask);
 static void on_ble_calibrate(uint8_t axis, int32_t park_offset, int32_t retreat_steps);
 static void on_calib_status(uint8_t axis, uint8_t phase, int32_t span_steps);
+static void on_ble_scenario(uint8_t cmd, uint8_t scenario_id, const uint8_t *payload, size_t len);
+static void on_ble_scenario_status_read(uint8_t *scenario_id, uint8_t *state, uint8_t *reason,
+                                        uint32_t *elapsed_ms, uint32_t *total_ms);
+static void on_scenario_status(uint8_t scenario_id, uint8_t state, uint8_t reason,
+                               uint32_t elapsed_ms, uint32_t total_ms);
 static void position_publisher_task(void *arg);
 void publish_position(void);
 
@@ -213,6 +219,8 @@ extern "C" void app_main(void)
         PCA9555_ENDSTOP_B,
         on_home_progress);
     motion_set_calib_status_cb(on_calib_status);
+    motion_scenario_init();
+    motion_scenario_set_status_cb(on_scenario_status);
 
     // Initialize BLE (everything inside)
     ble_init(
@@ -229,6 +237,8 @@ extern "C" void app_main(void)
         on_ble_limit_read,
         on_ble_position_read,
         on_ble_calibrate,
+        on_ble_scenario,
+        on_ble_scenario_status_read,
         on_microsteps,
         on_run_current,
         on_hold_current,
@@ -471,6 +481,13 @@ static void motion_apply_config(const app_config_t *cfg)
     bool c_vl = (cfg->virtual_limit & 0x02) != 0;
     bool b_vl = (cfg->virtual_limit & 0x04) != 0;
     motion_set_virtual_limit(x_vl, c_vl, b_vl);
+
+    motion_set_microsteps(cfg->microsteps[0], cfg->microsteps[1], cfg->microsteps[2]);
+
+    uint16_t speed[3], accel[3];
+    memcpy(&speed[0], cfg->axis_speed, 6);
+    memcpy(&accel[0], cfg->axis_accel, 6);
+    motion_set_default_kinematics(speed, accel);
 }
 
 
@@ -733,6 +750,26 @@ static void on_ble_position_read(int32_t *x, int32_t *c, int32_t *b, uint8_t *va
     if (valid_mask) *valid_mask = (uint8_t)((vx ? 0x01 : 0) | (vc ? 0x02 : 0) | (vb ? 0x04 : 0));
 }
 
+static void on_ble_scenario(uint8_t cmd, uint8_t scenario_id, const uint8_t *payload, size_t len) {
+    if (cmd == 0x02) {
+        motion_scenario_stop();
+    } else if (cmd == 0x01) {
+        motion_scenario_start(scenario_id, payload, len);
+    } else {
+        ESP_LOGW(TAG, "Unknown scenario command 0x%02X", cmd);
+    }
+}
+
+static void on_ble_scenario_status_read(uint8_t *scenario_id, uint8_t *state, uint8_t *reason,
+                                        uint32_t *elapsed_ms, uint32_t *total_ms) {
+    motion_scenario_get_status(scenario_id, state, reason, elapsed_ms, total_ms);
+}
+
+static void on_scenario_status(uint8_t scenario_id, uint8_t state, uint8_t reason,
+                               uint32_t elapsed_ms, uint32_t total_ms) {
+    ble_set_scenario_status(scenario_id, state, reason, elapsed_ms, total_ms);
+}
+
 static void on_ble_calibrate(uint8_t axis, int32_t park_offset, int32_t retreat_steps) {
     if (axis == 0xFF) {
         motion_abort_calibration();
@@ -788,6 +825,7 @@ static void position_publisher_task(void *arg) {
 static void on_microsteps(uint8_t x, uint8_t c, uint8_t b) {
     ESP_LOGI(TAG, "Config: microsteps X=%d C=%d B=%d", x, c, b);
     nvs_config_set_microsteps(x, c, b);
+    motion_set_microsteps(x, c, b);
     tmc2130_set_microsteps(AXIS_X_ID, x);
     tmc2130_set_microsteps(AXIS_C_ID, c);
     tmc2130_set_microsteps(AXIS_B_ID, b);
@@ -824,6 +862,12 @@ static void on_units_per_step(float x, float c, float b) {
 static void on_axis_speed(uint16_t x, uint16_t c, uint16_t b) {
     ESP_LOGI(TAG, "Config: axis speed X=%u C=%u B=%u", x, c, b);
     nvs_config_set_axis_speed(x, c, b);
+    {
+        const app_config_t *cfg = nvs_config_get();
+        uint16_t speed[3] = {x, c, b}, accel[3] = {0, 0, 0};
+        if (cfg) memcpy(&accel[0], cfg->axis_accel, 6);
+        motion_set_default_kinematics(speed, accel);
+    }
     stepper1->setSpeedInUs(speed_sps_to_us(x));
     stepper2->setSpeedInUs(speed_sps_to_us(c));
     stepper3->setSpeedInUs(speed_sps_to_us(b));
@@ -832,6 +876,12 @@ static void on_axis_speed(uint16_t x, uint16_t c, uint16_t b) {
 static void on_axis_accel(uint16_t x, uint16_t c, uint16_t b) {
     ESP_LOGI(TAG, "Config: axis acceleration X=%u C=%u B=%u", x, c, b);
     nvs_config_set_axis_accel(x, c, b);
+    {
+        const app_config_t *cfg = nvs_config_get();
+        uint16_t speed[3] = {0, 0, 0}, accel[3] = {x, c, b};
+        if (cfg) memcpy(&speed[0], cfg->axis_speed, 6);
+        motion_set_default_kinematics(speed, accel);
+    }
     stepper1->setAcceleration(x);
     stepper2->setAcceleration(c);
     stepper3->setAcceleration(b);

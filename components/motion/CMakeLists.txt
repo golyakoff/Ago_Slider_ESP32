@@ -1,6 +1,8 @@
 idf_component_register(
-    SRCS 
+    SRCS
         "src/motion.cpp"
+        "src/motion_scenario.cpp"
+        "src/scenario_focus.cpp"
     INCLUDE_DIRS 
         "include"
     REQUIRES 

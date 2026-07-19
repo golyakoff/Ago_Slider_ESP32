@@ -205,6 +205,77 @@ void motion_invalidate_home(void);
  */
 void motion_emergency_stop(void);
 
+/**
+ * @brief Tell motion the microstepping in force, needed to turn an angle into STEP pulses.
+ */
+void motion_set_microsteps(uint8_t x, uint8_t c, uint8_t b);
+
+/**
+ * @brief Set the speed and acceleration ordinary moves and homing fall back to.
+ *        Kept here rather than applied straight to the steppers so that a move which carries
+ *        its own kinematics cannot leave them behind for the next caller.
+ * @param speed_sps steps per second per axis
+ * @param accel     steps per second squared per axis
+ */
+void motion_set_default_kinematics(const uint16_t speed_sps[3], const uint16_t accel[3]);
+
+/**
+ * @brief Relative move with per-axis kinematics supplied by the caller.
+ * @param steps      relative STEP pulses per axis; 0 leaves that axis alone
+ * @param speed_mhz  speed in milli-steps per second (1000 = 1 step/s); 0 = the default.
+ *                   Millihertz because a scenario axis can need a fraction of a step per
+ *                   second, where the configured whole-steps-per-second would quantise the
+ *                   axes into drifting apart.
+ * @param accel      steps per second squared; 0 = the default
+ */
+void motion_move_relative_ex(const int32_t steps[3],
+                             const uint32_t speed_mhz[3],
+                             const uint32_t accel[3]);
+
+/**
+ * @brief Drive one axis to an absolute STEP position with the given kinematics. Scenarios use
+ *        this every tick to steer an axis along a curve the step generator cannot express by
+ *        itself; calling it repeatedly with a moving target makes the axis follow that target.
+ * @param axis      0=X, 1=C, 2=B
+ * @param target    absolute position in STEP pulses
+ * @param speed_mhz speed cap in milli-steps per second
+ * @param accel     steps per second squared
+ */
+void motion_axis_move_to(uint8_t axis, int32_t target, uint32_t speed_mhz, uint32_t accel);
+
+/**
+ * @brief Start an axis running continuously, with no target to stop at. This is how a scenario
+ *        steers an axis smoothly: a repeatedly updated moveTo() would have the ramp generator
+ *        planning to stop at every new target, so the axis would brake and accelerate on every
+ *        update — a judder that a camera would record. Continuous running plus
+ *        motion_axis_set_speed() changes only the velocity, which is what a curve actually is.
+ * @param axis     0=X, 1=C, 2=B
+ * @param forward  direction; a scenario axis must not reverse mid-run
+ * @param accel    steps per second squared used for every later speed change
+ */
+void motion_axis_run(uint8_t axis, bool forward, uint32_t accel);
+
+/** @brief Change the speed of a continuously running axis, taking effect immediately. */
+void motion_axis_set_speed(uint8_t axis, uint32_t speed_mhz);
+
+/** @brief Bring a running axis to a smooth, decelerated stop. */
+void motion_axis_stop_smooth(uint8_t axis);
+
+/** @brief Current speed in milli-steps per second, signed by direction. */
+int32_t motion_axis_current_speed_mhz(uint8_t axis);
+
+/** @brief Stop every axis, keeping the step counts — and so the coordinates — intact. */
+void motion_stop_all_keep_position(void);
+
+/** @brief Degrees (or mm) of axis travel per STEP pulse, i.e. units-per-step over microsteps. */
+float motion_units_per_pulse(uint8_t axis);
+
+/** @brief True while homing or calibration owns the axes, so a scenario must not start. */
+bool motion_is_busy(void);
+
+/** @brief True while the axis still has queued steps to emit. */
+bool motion_axis_is_running(uint8_t axis);
+
 #ifdef __cplusplus
 }
 #endif

@@ -5,6 +5,8 @@
 #include "tmc2130.h"
 #include "pca9555.h"               // for pca9555_get_gpio_value
 #include "FastAccelStepper.h"      // for FastAccelStepper class definition
+#include <math.h>
+#include "motion_scenario.h"
 
 static const char *TAG = "MOTION";
 
@@ -34,12 +36,20 @@ static struct {
 // without re-homing, yet can never mistake a post-reboot zero for a homed one.
 static volatile bool s_home_valid[3] = {false, false, false};
 
+// Kinematics ordinary moves and homing fall back to. Held here rather than pushed straight
+// into the steppers so that a move carrying its own speed cannot leave it behind for the
+// next caller — a scenario crawling C at 0.5 step/s must not make the next homing crawl too.
+static uint16_t s_default_speed_sps[3] = {1000, 1000, 1000};
+static uint16_t s_default_accel[3] = {2000, 2000, 2000};
+static uint8_t s_microsteps[3] = {16, 16, 16};
+
 // Configuration storage
 static bool s_axis_deg[3] = {false, false, false};   // true = degrees, false = mm
 static float s_units_per_step[3] = {0.0f, 0.0f, 0.0f};
 static bool s_virtual_limit_enabled[3] = {false, false, false};
 
 static void calib_task(void *arg);
+static void apply_default_kinematics(int axis);
 
 // The X carriage needs well over 30 s to cross the full rail at homing speed
 #define HOMING_TIMEOUT_MS   90000
@@ -88,6 +98,9 @@ static void monitor_limits_task(void *arg) {
             if (motion_is_calibrating()) continue;
             s_steppers[i]->forceStop();
             ESP_LOGI(TAG, "Virtual limit %c triggered, axis stopped", "XCB"[i]);
+            // A scenario whose axis just hit a switch is no longer framing anything —
+            // stop the whole pass rather than let the other axes carry on alone
+            motion_scenario_abort(MOTION_SCENARIO_REASON_LIMIT);
         }
 
         vTaskDelay(pdMS_TO_TICKS(50));
@@ -216,6 +229,114 @@ void motion_set_units_per_step(float x, float c, float b)
     ESP_LOGI(TAG, "Units per step: X=%f, C=%f, B=%f", x, c, b);
 }
 
+void motion_set_microsteps(uint8_t x, uint8_t c, uint8_t b)
+{
+    s_microsteps[0] = x ? x : 1;
+    s_microsteps[1] = c ? c : 1;
+    s_microsteps[2] = b ? b : 1;
+}
+
+void motion_set_default_kinematics(const uint16_t speed_sps[3], const uint16_t accel[3])
+{
+    for (int i = 0; i < 3; i++) {
+        s_default_speed_sps[i] = speed_sps[i];
+        s_default_accel[i] = accel[i];
+    }
+}
+
+// Puts the fallback kinematics back on an axis. Every entry point that is not itself
+// carrying kinematics calls this first, so no move can inherit the previous one's speed.
+static void apply_default_kinematics(int axis)
+{
+    if (!s_steppers[axis]) return;
+    uint32_t sps = s_default_speed_sps[axis] ? s_default_speed_sps[axis] : 1000;
+    s_steppers[axis]->setSpeedInMilliHz(sps * 1000);
+    s_steppers[axis]->setAcceleration(s_default_accel[axis] ? s_default_accel[axis] : 2000);
+}
+
+void motion_move_relative_ex(const int32_t steps[3],
+                             const uint32_t speed_mhz[3],
+                             const uint32_t accel[3])
+{
+    if (s_homing.active || motion_is_calibrating()) {
+        ESP_LOGW(TAG, "Cannot move with parameters while homing or calibrating");
+        return;
+    }
+    for (int i = 0; i < 3; i++) {
+        if (!s_steppers[i] || steps[i] == 0) continue;
+        if (speed_mhz[i] > 0) {
+            s_steppers[i]->setSpeedInMilliHz(speed_mhz[i]);
+        } else {
+            s_steppers[i]->setSpeedInMilliHz((uint32_t)s_default_speed_sps[i] * 1000);
+        }
+        s_steppers[i]->setAcceleration(accel[i] > 0 ? (int32_t)accel[i] : s_default_accel[i]);
+        s_steppers[i]->move(steps[i]);
+    }
+}
+
+void motion_axis_move_to(uint8_t axis, int32_t target, uint32_t speed_mhz, uint32_t accel)
+{
+    if (axis > 2 || !s_steppers[axis]) return;
+    s_steppers[axis]->setSpeedInMilliHz(speed_mhz > 0 ? speed_mhz : 1000);
+    s_steppers[axis]->setAcceleration(accel > 0 ? (int32_t)accel : 1);
+    s_steppers[axis]->moveTo(target);
+}
+
+void motion_axis_run(uint8_t axis, bool forward, uint32_t accel)
+{
+    if (axis > 2 || !s_steppers[axis]) return;
+    s_steppers[axis]->setAcceleration(accel > 0 ? (int32_t)accel : 1);
+    if (forward) {
+        s_steppers[axis]->runForward();
+    } else {
+        s_steppers[axis]->runBackward();
+    }
+}
+
+void motion_axis_set_speed(uint8_t axis, uint32_t speed_mhz)
+{
+    if (axis > 2 || !s_steppers[axis]) return;
+    s_steppers[axis]->setSpeedInMilliHz(speed_mhz > 0 ? speed_mhz : 1);
+    // Without this the new value would sit unused until the next move command
+    s_steppers[axis]->applySpeedAcceleration();
+}
+
+void motion_axis_stop_smooth(uint8_t axis)
+{
+    if (axis > 2 || !s_steppers[axis]) return;
+    s_steppers[axis]->stopMove();
+}
+
+int32_t motion_axis_current_speed_mhz(uint8_t axis)
+{
+    if (axis > 2 || !s_steppers[axis]) return 0;
+    return s_steppers[axis]->getCurrentSpeedInMilliHz();
+}
+
+void motion_stop_all_keep_position(void)
+{
+    for (int i = 0; i < 3; i++) {
+        if (s_steppers[i]) s_steppers[i]->forceStop();
+        apply_default_kinematics(i);
+    }
+}
+
+float motion_units_per_pulse(uint8_t axis)
+{
+    if (axis > 2) return 0.0f;
+    return s_units_per_step[axis] / (float)s_microsteps[axis];
+}
+
+bool motion_is_busy(void)
+{
+    return s_homing.active || motion_is_calibrating();
+}
+
+bool motion_axis_is_running(uint8_t axis)
+{
+    return axis <= 2 && s_steppers[axis] && s_steppers[axis]->isRunning();
+}
+
 void motion_set_virtual_limit(bool x_en, bool c_en, bool b_en)
 {
     s_virtual_limit_enabled[0] = x_en;
@@ -236,6 +357,10 @@ void motion_start_homing(bool home_x, bool home_c, bool home_b)
     }
 
     stop_all_axes();
+    // A scenario may have left an axis crawling; homing must run at its own speed or the
+    // 90 s timeout would expire long before the carriage reached anything
+    motion_scenario_abort(MOTION_SCENARIO_REASON_USER_STOP);
+    for (int i = 0; i < 3; i++) apply_default_kinematics(i);
 
     s_homing.active = true;
     s_homing.requested[0] = home_x;
@@ -265,6 +390,7 @@ void motion_move_relative(int32_t x, int32_t c, int32_t b)
         return;
     }
 
+    for (int i = 0; i < 3; i++) apply_default_kinematics(i);
     if (s_steppers[0] && x != 0) s_steppers[0]->move(x);
     if (s_steppers[1] && c != 0) s_steppers[1]->move(c);
     if (s_steppers[2] && b != 0) s_steppers[2]->move(b);
@@ -354,6 +480,8 @@ void motion_start_calibration(uint8_t axis, int32_t park_offset_steps, int32_t r
     s_calib.park_offset = park_offset_steps;
     s_calib.retreat = (retreat_steps > 0) ? retreat_steps : 1000;
     s_calib.span = 0;
+    // Start from the configured speed, not from whatever the last move happened to leave
+    apply_default_kinematics(axis);
     s_calib.saved_speed_us = s_steppers[axis]->getSpeedInUs();
     calib_set_phase(MOTION_CALIB_SEEK_MIN_FAST);
 }
@@ -536,5 +664,6 @@ void motion_emergency_stop(void)
 {
     stop_all_axes();
     s_homing.active = false;
+    motion_scenario_abort(MOTION_SCENARIO_REASON_USER_STOP);
     ESP_LOGW(TAG, "Emergency stop");
 }

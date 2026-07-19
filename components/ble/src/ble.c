@@ -40,6 +40,11 @@ enum {
     IDX_CHAR_VAL_CALIB,                  // CALIBRATE value (write: 9 bytes; notify: 6 bytes)
     IDX_CHAR_CALIB_CFG,                  // CALIBRATE CCCD
 
+    // Scenarios: one framing for every movement pattern (write + notify)
+    IDX_CHAR_SCENARIO,                   // SCENARIO declaration
+    IDX_CHAR_VAL_SCENARIO,               // SCENARIO value (write: command; notify: status)
+    IDX_CHAR_SCENARIO_CFG,               // SCENARIO CCCD
+
     // Homing (notifiable)
     IDX_CHAR_HOME,                       // HOME declaration
     IDX_CHAR_VAL_HOME,                   // HOME value (read/write)
@@ -173,6 +178,12 @@ enum {
                                             // Notify: published periodically while any axis is moving.
 
 #define BLE_CALIB_CHAR_UUID         0xF006  // Hardware calibration command & status.
+#define BLE_SCENARIO_CHAR_UUID      0xF007  // Scenario command & status. Write: byte0 command
+                                            //        (0x01 start, 0x02 stop), byte1 scenario id,
+                                            //        bytes2.. scenario payload (uint32 LE duration
+                                            //        in ms first, then the pattern's own fields).
+                                            // Notify/read: 11 bytes — id, state, reason,
+                                            //        uint32 LE elapsed ms, uint32 LE total ms.
                                             // Write : 9 bytes: axis (1 byte, 0=X/1=C/2=B, 0xFF=abort),
                                             //        park offset (int32 LE, STEP pulses from the min trigger),
                                             //        retreat distance (int32 LE, STEP pulses).
@@ -295,6 +306,7 @@ static const uint16_t limit_char_uuid = BLE_LIMIT_CHAR_UUID;
 static const uint16_t move_char_uuid = BLE_MOVE_CHAR_UUID;
 static const uint16_t position_char_uuid = BLE_POSITION_CHAR_UUID;
 static const uint16_t calib_char_uuid = BLE_CALIB_CHAR_UUID;
+static const uint16_t scenario_char_uuid = BLE_SCENARIO_CHAR_UUID;
 
 static const uint16_t pwr_info_str_char_uuid = BLE_PWR_INFO_STR_CHAR_UUID;
 static const uint16_t pwr_info_char_uuid = BLE_PWR_INFO_CHAR_UUID;
@@ -328,6 +340,7 @@ static const uint8_t move_default_val[12] = {0};
 static const uint8_t limit_default_val[1] = {0};
 static const uint8_t position_default_val[13] = {0};
 static const uint8_t calib_default_val[9] = {0};
+static const uint8_t scenario_default_val[11] = {0};
 
 static uint8_t microsteps_val[3] =      {16, 16, 16};                        // 1/16 for all axis
 static uint8_t run_current_val[6] =     {900 & 0xFF, (900 >> 8) & 0xFF,     // 900 mA for X
@@ -370,6 +383,8 @@ static ble_disconnect_cb_t s_disconnect_cb = NULL;
 static ble_limit_read_cb_t s_limit_read_cb = NULL;
 static ble_position_read_cb_t s_position_read_cb = NULL;
 static ble_calibrate_cb_t s_calibrate_cb = NULL;
+static ble_scenario_cb_t s_scenario_cb = NULL;
+static ble_scenario_status_read_cb_t s_scenario_status_read_cb = NULL;
 static ble_mot_en_cb_t s_mot_en_cb = NULL;
 static ble_home_cmd_cb_t s_home_cmd_cb = NULL;
 static ble_move_cb_t s_move_cb = NULL;
@@ -393,6 +408,7 @@ static ble_ota_data_cb_t s_ota_data_cb = NULL;
 static bool limit_notify_enabled = false;
 static bool position_notify_enabled = false;
 static bool calib_notify_enabled = false;
+static bool scenario_notify_enabled = false;
 static bool home_notify_enabled = false;
 static bool batt_level_notify = false;
 static bool pwr_info_notify = false;
@@ -468,6 +484,27 @@ static const esp_gatts_attr_db_t gatt_db[HRS_IDX_NB] = {
 
     // CALIBRATE CCCD
     [IDX_CHAR_CALIB_CFG] = {
+        {ESP_GATT_AUTO_RSP},
+        {ESP_UUID_LEN_16, (uint8_t *)&character_client_config_uuid, ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
+         sizeof(uint16_t), 2, (uint8_t *)"\x00\x00"}
+    },
+
+    // SCENARIO Characteristic Declaration
+    [IDX_CHAR_SCENARIO] = {
+        {ESP_GATT_AUTO_RSP},
+        {ESP_UUID_LEN_16, (uint8_t *)&character_declaration_uuid, ESP_GATT_PERM_READ,
+         CHAR_DECLARATION_SIZE, CHAR_DECLARATION_SIZE, (uint8_t *)&char_prop_rwn}
+    },
+
+    // SCENARIO Characteristic Value
+    [IDX_CHAR_VAL_SCENARIO] = {
+        {ESP_GATT_AUTO_RSP},
+        {ESP_UUID_LEN_16, (uint8_t *)&scenario_char_uuid, ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
+         64, sizeof(scenario_default_val), (uint8_t *)scenario_default_val}
+    },
+
+    // SCENARIO CCCD
+    [IDX_CHAR_SCENARIO_CFG] = {
         {ESP_GATT_AUTO_RSP},
         {ESP_UUID_LEN_16, (uint8_t *)&character_client_config_uuid, ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
          sizeof(uint16_t), 2, (uint8_t *)"\x00\x00"}
@@ -1025,6 +1062,18 @@ static void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_
                     esp_ble_gatts_send_response(gatts_if, param->write.conn_id, param->write.trans_id, ESP_GATT_OK, NULL);
                 }
             }
+            // Handle SCENARIO command write
+            else if (handle == handle_table[IDX_CHAR_VAL_SCENARIO]) {
+                if (param->write.len >= 1 && s_scenario_cb) {
+                    uint8_t cmd = param->write.value[0];
+                    uint8_t id = (param->write.len >= 2) ? param->write.value[1] : 0;
+                    const uint8_t *payload = (param->write.len > 2) ? &param->write.value[2] : NULL;
+                    size_t plen = (param->write.len > 2) ? (param->write.len - 2) : 0;
+                    s_scenario_cb(cmd, id, payload, plen);
+                } else {
+                    ESP_LOGW(TAG, "Scenario write too short (%d)", param->write.len);
+                }
+            }
             // Handle CALIBRATE command write
             else if (handle == handle_table[IDX_CHAR_VAL_CALIB]) {
                 if (param->write.len >= 9 && s_calibrate_cb) {
@@ -1167,6 +1216,11 @@ static void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_
                 }
             }
             // Handle CCCD for CALIBRATE
+            else if (param->write.handle == handle_table[IDX_CHAR_SCENARIO_CFG]) {
+                uint16_t descr_value = param->write.value[1] << 8 | param->write.value[0];
+                scenario_notify_enabled = (descr_value == 0x0001);
+                ESP_LOGI(TAG, "SCENARIO notifications %s", scenario_notify_enabled ? "enabled" : "disabled");
+            }
             else if (param->write.handle == handle_table[IDX_CHAR_CALIB_CFG]) {
                 if (param->write.len == 2) {
                     calib_notify_enabled = (param->write.value[0] == 0x01);
@@ -1262,6 +1316,18 @@ static void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_
                 buf[12] = valid_mask;
                 esp_ble_gatts_set_attr_value(handle_table[IDX_CHAR_VAL_POSITION], sizeof(buf), buf);
             }
+            else if (handle == handle_table[IDX_CHAR_VAL_SCENARIO] && s_scenario_status_read_cb) {
+                uint8_t id = 0, state = 0, reason = 0;
+                uint32_t elapsed = 0, total = 0;
+                s_scenario_status_read_cb(&id, &state, &reason, &elapsed, &total);
+                uint8_t buf[11];
+                buf[0] = id;
+                buf[1] = state;
+                buf[2] = reason;
+                memcpy(&buf[3], &elapsed, 4);
+                memcpy(&buf[7], &total, 4);
+                esp_ble_gatts_set_attr_value(handle_table[IDX_CHAR_VAL_SCENARIO], sizeof(buf), buf);
+            }
             else if (handle == handle_table[IDX_CHAR_VAL_VERSION] && s_version_read_cb) {
                 const char *ver = s_version_read_cb();
                 esp_ble_gatts_set_attr_value(handle, strlen(ver), (uint8_t*)ver);
@@ -1339,6 +1405,8 @@ void ble_init(
     ble_limit_read_cb_t limit_read_cb,
     ble_position_read_cb_t position_read_cb,
     ble_calibrate_cb_t calibrate_cb,
+    ble_scenario_cb_t scenario_cb,
+    ble_scenario_status_read_cb_t scenario_status_read_cb,
     ble_microsteps_cb_t microsteps_cb,
     ble_run_current_cb_t run_current_cb,
     ble_hold_current_cb_t hold_current_cb,
@@ -1364,6 +1432,8 @@ void ble_init(
     s_limit_read_cb = limit_read_cb;
     s_position_read_cb = position_read_cb;
     s_calibrate_cb = calibrate_cb;
+    s_scenario_cb = scenario_cb;
+    s_scenario_status_read_cb = scenario_status_read_cb;
     
     s_microsteps_cb = microsteps_cb;
     s_run_current_cb = run_current_cb;
@@ -1541,6 +1611,33 @@ void ble_set_position(int32_t x, int32_t c, int32_t b, uint8_t valid_mask)
 }
 
 // ----------------------------- Send Calibration Status -----------------------------
+void ble_set_scenario_status(uint8_t scenario_id, uint8_t state, uint8_t reason,
+                             uint32_t elapsed_ms, uint32_t total_ms)
+{
+    if (!attr_table_ready)
+        return;
+
+    uint8_t buf[11];
+    buf[0] = scenario_id;
+    buf[1] = state;
+    buf[2] = reason;
+    memcpy(&buf[3], &elapsed_ms, 4);
+    memcpy(&buf[7], &total_ms, 4);
+
+    esp_ble_gatts_set_attr_value(
+        handle_table[IDX_CHAR_VAL_SCENARIO], sizeof(buf), buf);
+
+    if (connected && scenario_notify_enabled) {
+        esp_ble_gatts_send_indicate(
+            s_gatts_if,
+            conn_id,
+            handle_table[IDX_CHAR_VAL_SCENARIO],
+            sizeof(buf),
+            buf,
+            false);
+    }
+}
+
 void ble_set_calib_status(uint8_t axis, uint8_t phase, int32_t span_steps)
 {
     if (!attr_table_ready)
