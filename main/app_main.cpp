@@ -594,9 +594,13 @@ void init_ina219(void) {
 }
 
 static void on_ina219_data(float voltage, float current, float power) {
-    // Calculate battery percentage (0-100) for a 5-cell Li-ion battery (18.0V discharged, 21.5V fully charged)
+    // Battery percentage (0-100). The top end is measured, not nominal: this pack sits at
+    // 20.2-20.3 V straight off the charger, well under the 21.0 V a 5S Li-ion would reach at
+    // 4.2 V per cell, so a textbook figure here left a full battery reading about 65%.
+    // Anything at or above the top counts as full. The bottom end is still the nominal
+    // 3.6 V per cell and has not been verified against this pack running down.
     const float min_voltage = 18.0f;
-    const float max_voltage = 21.5f;
+    const float max_voltage = 20.2f;
     uint8_t batt_lvl_percent = 0;
     if (voltage >= max_voltage)
         batt_lvl_percent = 100;

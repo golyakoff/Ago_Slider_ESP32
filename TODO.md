@@ -31,3 +31,33 @@ and needed to be redesigned for ESP-IDF.
   of the previous 512-byte Prepare/Execute long writes — 3 round trips each) and the
   fixed 30 ms per-chunk delay is gone. Prepared long writes are still supported firmware-
   side (buffer + EXEC_WRITE) for compatibility with app v0.1.0.
+
+## Focus scenario: C lags at the end of a pass
+
+Measured on hardware 2026-07-20 (60 s pass, 770 mm of X travel, subject 27 cm away): C
+tracks the subject to within 4 pulses (0.05 deg) for about 95% of the run, then falls
+behind by 49 pulses (0.65 deg) over the last 1.5 s. In frame that is a slight slide off
+centre in the closing second — invisible on a normal lens, but not on a long one.
+
+The error appears exactly when X begins decelerating. The feed-forward term is proportional
+to X's instantaneous speed, so it vanishes as X stops, leaving only the correction term,
+whose 3 s time constant is far too slow for a ~1.5 s deceleration ramp.
+
+That explanation is incomplete, and the gap matters: the captured log shows C's position
+frozen at 2767 pulses for the final 1.5 s while the commanded speed was still non-zero
+(66 -> 43 -> 16 pulses/s). Something stopped the axis outright rather than merely slowing
+it, and the feed-forward argument does not account for that. **Start here**, not with
+tuning.
+
+Rejected: a settle phase after X stops. It would force the user to pad every shot with
+footage they do not want.
+
+Candidate directions:
+- Explain the freeze first — instrument `motion_axis_set_speed` / the ramp generator's
+  state around the deceleration, and check whether `applySpeedAcceleration()` behaves as
+  assumed when the speed cap falls steeply while running continuously.
+- Shorten the ramp: the error accumulates over the deceleration, so less time in it means
+  less to accumulate. The scenario currently computes its own ramp (5% of duration, capped
+  at 2 s) and deliberately ignores the stored settings, so this needs a new parameter
+  before it is a lever the user can reach.
+- Scale the correction's time constant with how much of the pass is left.
