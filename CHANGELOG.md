@@ -1,3 +1,11 @@
+# Release 0.1.7
+
+- Axes that turn full circles are now understood as such. A new per-axis setting marks an
+  axis that rotates freely past a single index magnet instead of running between two
+  endstops; calibrating one zeroes it on the magnet rather than half a turn away.
+- Homing status keeps saying "homed" for axes the current run does not touch. Homing one
+  axis used to clear the others, as though they had lost their reference.
+
 # Release 0.1.6
 
 - The battery gauge is calibrated against the actual pack: a full charge reads about 20.2 V
