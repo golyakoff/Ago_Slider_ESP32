@@ -3,6 +3,7 @@
 #include "nvs.h"
 #include "esp_log.h"
 #include <string.h>
+#include <stddef.h>
 
 static const char *TAG = "NVS_CONFIG";
 static app_config_t s_config;
@@ -14,7 +15,7 @@ static bool s_initialized = false;
 // the struct would silently wipe every user's configuration on upgrade.
 // Devices written before versioning existed have no key at all and read as 0.
 #define CONFIG_SCHEMA_KEY     "cfg_ver"
-#define CONFIG_SCHEMA_VERSION 1
+#define CONFIG_SCHEMA_VERSION 2
 
 // Default values (use app_config pack functions to fill)
 const app_config_t NVS_CONFIG_DEFAULT = {
@@ -41,6 +42,7 @@ const app_config_t NVS_CONFIG_DEFAULT = {
     .virtual_limit = 0x05,                          // X and B enabled
     .stealthchop = 0x07,                            // all axes enabled
     .invert_dir = 0x00,                             // not invert all
+    .continuous = 0x00,                             // every axis runs between two endstops
 };
 static esp_err_t save_to_nvs(void)
 {
@@ -82,6 +84,14 @@ static void migrate_v0_to_v1(app_config_t *cfg)
              x, nx, c, nc, b, nb);
 }
 
+// v1 -> v2: the struct gained the "continuous rotary" flags. A v1 blob is one byte shorter,
+// so the bytes that were read land correctly and only the new field needs a value.
+static void migrate_v1_to_v2(app_config_t *cfg)
+{
+    cfg->continuous = 0x00;
+    ESP_LOGW(TAG, "Schema v1->v2: continuous-rotary flags added, defaulted to none");
+}
+
 // Applies every migration between the stored schema version and the current one.
 // Returns true when the configuration was changed and needs saving.
 static bool migrate_config(uint8_t from_version, app_config_t *cfg)
@@ -89,6 +99,10 @@ static bool migrate_config(uint8_t from_version, app_config_t *cfg)
     bool changed = false;
     if (from_version < 1) {
         migrate_v0_to_v1(cfg);
+        changed = true;
+    }
+    if (from_version < 2) {
+        migrate_v1_to_v2(cfg);
         changed = true;
     }
     return changed;
@@ -127,8 +141,14 @@ esp_err_t nvs_config_init(void)
         nvs_set_blob(nvs, "app_config", &s_config, sizeof(s_config));
         nvs_commit(nvs);
     } else {
-        if (size != sizeof(s_config)) {
-            ESP_LOGW(TAG, "Size mismatch, using defaults");
+        // A blob shorter by exactly the fields appended since is an older layout, not
+        // corruption: the bytes read are still valid and only the new tail needs filling.
+        // Treating it as corruption would answer an upgrade by wiping the user's settings.
+        bool older_layout = (size < sizeof(s_config)) &&
+                            (size >= offsetof(app_config_t, continuous));
+        if (size != sizeof(s_config) && !older_layout) {
+            ESP_LOGW(TAG, "Size mismatch (%u vs %u), using defaults",
+                     (unsigned)size, (unsigned)sizeof(s_config));
             memcpy(&s_config, &NVS_CONFIG_DEFAULT, sizeof(s_config));
             nvs_set_blob(nvs, "app_config", &s_config, sizeof(s_config));
             nvs_commit(nvs);
@@ -253,5 +273,12 @@ esp_err_t nvs_config_set_invert_dir(bool x_inv, bool c_inv, bool b_inv)
 {
     if (!s_initialized) return ESP_ERR_INVALID_STATE;
     app_config_pack_invert_dir(&s_config, x_inv, c_inv, b_inv);
+    return save_to_nvs();
+}
+
+esp_err_t nvs_config_set_continuous(bool x, bool c, bool b)
+{
+    if (!s_initialized) return ESP_ERR_INVALID_STATE;
+    app_config_pack_continuous(&s_config, x, c, b);
     return save_to_nvs();
 }

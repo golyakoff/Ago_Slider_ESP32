@@ -144,10 +144,13 @@ static void homing_task(void *arg) {
             }
         }
 
-        // send progress via callback
+        // "Homed" reports the SAME fact as the position validity flag — this axis is
+        // anchored to its endstop and still is. Reporting only the current run's progress
+        // made homing one axis look as if the others had lost their reference, when all
+        // that changed was which axes this run touched.
         if (s_home_cb) {
             s_home_cb(s_homing.requested[0], s_homing.requested[1], s_homing.requested[2],
-                      s_homing.homed[0], s_homing.homed[1], s_homing.homed[2]);
+                      s_home_valid[0], s_home_valid[1], s_home_valid[2]);
         }
 
         // check if all requested axes are done
@@ -165,7 +168,7 @@ static void homing_task(void *arg) {
             // final status update
             if (s_home_cb) {
                 s_home_cb(s_homing.requested[0], s_homing.requested[1], s_homing.requested[2],
-                          s_homing.homed[0], s_homing.homed[1], s_homing.homed[2]);
+                          s_home_valid[0], s_home_valid[1], s_home_valid[2]);
             }
             continue;
         }
@@ -372,13 +375,16 @@ void motion_start_homing(bool home_x, bool home_c, bool home_b)
     s_homing.start_time_ms = esp_log_timestamp();
 
     for (int i = 0; i < 3; i++) {
-        if (s_homing.requested[i] && s_steppers[i]) {
-            s_steppers[i]->move(-2000000);
-        }
+        if (!s_homing.requested[i]) continue;
+        // An axis about to be re-homed is no longer anchored until it arrives; the axes this
+        // run does not touch keep theirs
+        s_home_valid[i] = false;
+        if (s_steppers[i]) s_steppers[i]->move(-2000000);
     }
 
     if (s_home_cb) {
-        s_home_cb(home_x, home_c, home_b, false, false, false);
+        s_home_cb(home_x, home_c, home_b,
+                  s_home_valid[0], s_home_valid[1], s_home_valid[2]);
     }
     ESP_LOGI(TAG, "Homing started: X=%d C=%d B=%d", home_x, home_c, home_b);
 }

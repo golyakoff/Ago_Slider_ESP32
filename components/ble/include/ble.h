@@ -178,6 +178,13 @@ typedef void (*ble_stealthchop_cb_t)(bool x_stealthchop, bool c_stealthchop, boo
 typedef void (*ble_invert_dir_cb_t)(bool x_invert_dir, bool c_invert_dir, bool b_invert_dir);
 
 /**
+ * @brief Called when CONTINUOUS is written. A continuous axis turns full circles past a
+ *        single index magnet instead of running between two endstops, so its calibration
+ *        span is a revolution less the trigger zone and its zero is the index itself.
+ */
+typedef void (*ble_continuous_cb_t)(bool x, bool c, bool b);
+
+/**
  * @brief Callback for reading firmware version (characteristic VERSION)
  * @return Pointer to null-terminated version string (e.g., "1.0.0").
  *         The string must remain valid for the lifetime of the BLE stack.
@@ -259,7 +266,8 @@ void ble_init(
     ble_axis_accel_cb_t axis_accel_cb,
     ble_virtual_limit_cb_t virtual_limit_cb,
     ble_stealthchop_cb_t stealthchop_cb,
-    ble_invert_dir_cb_t invert_dir_cb);
+    ble_invert_dir_cb_t invert_dir_cb,
+    ble_continuous_cb_t continuous_cb);
 
 // ============================================================================
 // Initial configuration setters (call before ble_init)
@@ -328,6 +336,9 @@ void ble_set_axis_accel_value(uint16_t x, uint16_t c, uint16_t b);
  * @param b_en  enable for B axis
  */
 void ble_set_virtual_limit_value(bool x_en, bool c_en, bool b_en);
+
+/** @brief Seed the CONTINUOUS characteristic from stored configuration. */
+void ble_set_continuous_value(bool x, bool c, bool b);
 
 // ============================================================================
 // Sending notifications / updating characteristic values

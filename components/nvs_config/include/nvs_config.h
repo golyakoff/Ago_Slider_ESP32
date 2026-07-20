@@ -136,6 +136,12 @@ esp_err_t nvs_config_set_stealthchop(bool x_en, bool c_en, bool b_en);
  */
 esp_err_t nvs_config_set_invert_dir(bool x_inv, bool c_inv, bool b_inv);
 
+/**
+ * @brief Mark axes as continuous rotary: no travel limits, one index magnet the calibration
+ *        meets from both sides.
+ */
+esp_err_t nvs_config_set_continuous(bool x, bool c, bool b);
+
 #ifdef __cplusplus
 }
 #endif

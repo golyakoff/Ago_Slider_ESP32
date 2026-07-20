@@ -107,6 +107,9 @@ enum {
     IDX_CHAR_INVERT_DIR,                 // Invert direction declaration
     IDX_CHAR_VAL_INVERT_DIR,             // Invert direction value (1 byte, bits per axis)
 
+    IDX_CHAR_CONTINUOUS,                 // Continuous-rotary declaration
+    IDX_CHAR_VAL_CONTINUOUS,             // Continuous-rotary value (1 byte, bits per axis)
+
     // ----- OTA -----
     IDX_CHAR_VERSION,                   // Version declaration
     IDX_CHAR_VAL_VERSION,               // Version value (read + notify)
@@ -273,6 +276,10 @@ enum {
                                             // Read  : same as written.
 
 #define BLE_INVERT_DIR_CHAR_UUID    0xF039  // Invert direction flags, 1 byte (bits).
+#define BLE_CONTINUOUS_CHAR_UUID    0xF03A  // Continuous-rotary flags, 1 byte (bits 0=X,1=C,2=B).
+                                            //        Such an axis turns full circles past one
+                                            //        index magnet instead of running between two
+                                            //        endstops.
                                             //      bit0: X axis, bit1: C axis, bit2: B axis.
                                             // Write : 1 byte with bits.
                                             // Read  : same as written.
@@ -322,6 +329,7 @@ static const uint16_t axis_accel_char_uuid = BLE_AXIS_ACCEL_CHAR_UUID;
 static const uint16_t virtual_limit_char_uuid = BLE_VIRTUAL_LIMIT_CHAR_UUID;
 static const uint16_t stealthchop_char_uuid = BLE_STEALTHCHOP_CHAR_UUID;
 static const uint16_t invert_dir_char_uuid = BLE_INVERT_DIR_CHAR_UUID;
+static const uint16_t continuous_char_uuid = BLE_CONTINUOUS_CHAR_UUID;
 static const uint16_t version_char_uuid_str = BLE_VERSION_CHAR_UUID;
 static const uint16_t ota_control_char_uuid_str = BLE_OTA_CONTROL_CHAR_UUID;
 static const uint16_t ota_data_char_uuid_str = BLE_OTA_DATA_CHAR_UUID;
@@ -364,6 +372,7 @@ static uint8_t virtual_limit_val[1] =   {0x05};                             // B
                                                                             //       continuously beyond 360°
 static uint8_t stealthchop_val[1] =     {0x07};                             // StealthChop enabled for all axes
 static uint8_t invert_dir_val[1] =      {0x00};                             // No inverted direction
+static uint8_t continuous_val[1] =      {0x00};                             // Every axis has two endstops
 
 static char version_val[32] = "0.0.1";          // firmware version string (max 31 chars)
 static uint8_t ota_control_val[5] = {0};        // up to 5 bytes (command + 32-bit size)
@@ -399,6 +408,7 @@ static ble_axis_accel_cb_t s_axis_accel_cb = NULL;
 static ble_virtual_limit_cb_t s_virtual_limit_cb = NULL;
 static ble_stealthchop_cb_t s_stealthchop_cb = NULL;
 static ble_invert_dir_cb_t s_invert_dir_cb = NULL;
+static ble_continuous_cb_t s_continuous_cb = NULL;
 
 static ble_version_read_cb_t s_version_read_cb = NULL;
 static ble_ota_control_cb_t s_ota_control_cb = NULL;
@@ -763,6 +773,20 @@ static const esp_gatts_attr_db_t gatt_db[HRS_IDX_NB] = {
         {ESP_GATT_AUTO_RSP},
         {ESP_UUID_LEN_16, (uint8_t *)&invert_dir_char_uuid, ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
          1, 1, invert_dir_val}
+    },
+
+    // CONTINUOUS Characteristic Declaration
+    [IDX_CHAR_CONTINUOUS] = {
+        {ESP_GATT_AUTO_RSP},
+        {ESP_UUID_LEN_16, (uint8_t *)&character_declaration_uuid, ESP_GATT_PERM_READ,
+         CHAR_DECLARATION_SIZE, CHAR_DECLARATION_SIZE, (uint8_t *)&char_prop_rwn}
+    },
+
+    // CONTINUOUS Characteristic Value
+    [IDX_CHAR_VAL_CONTINUOUS] = {
+        {ESP_GATT_AUTO_RSP},
+        {ESP_UUID_LEN_16, (uint8_t *)&continuous_char_uuid, ESP_GATT_PERM_READ | ESP_GATT_PERM_WRITE,
+         1, 1, continuous_val}
     },
 
     // ----- OTA -----
@@ -1131,6 +1155,27 @@ static void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_
                     esp_ble_gatts_send_response(gatts_if, param->write.conn_id, param->write.trans_id, ESP_GATT_OK, NULL);
                 }
             }
+            // Handle CFG Continuous-rotary write
+            else if (handle == handle_table[IDX_CHAR_VAL_CONTINUOUS]) {
+                if (param->write.len == 1) {
+                    if (s_continuous_cb) {
+                        uint8_t val = param->write.value[0];
+                        bool x = (val & 0x01) != 0;
+                        bool c = (val & 0x02) != 0;
+                        bool b = (val & 0x04) != 0;
+                        memcpy(continuous_val, param->write.value, 1);
+                        s_continuous_cb(x, c, b);
+                        ESP_LOGI(TAG, "Continuous rotary: X=%d, C=%d, B=%d", x, c, b);
+                    } else {
+                        ESP_LOGW(TAG, "No callback for Continuous rotary");
+                    }
+                } else {
+                    ESP_LOGW(TAG, "Continuous write length %d (expected 1)", param->write.len);
+                }
+                if (param->write.need_rsp) {
+                    esp_ble_gatts_send_response(gatts_if, param->write.conn_id, param->write.trans_id, ESP_GATT_OK, NULL);
+                }
+            }
             // Handle CFG Invert direction write
             else if (handle == handle_table[IDX_CHAR_VAL_INVERT_DIR]) {
                 if (param->write.len == 1) {
@@ -1416,7 +1461,8 @@ void ble_init(
     ble_axis_accel_cb_t axis_accel_cb,
     ble_virtual_limit_cb_t virtual_limit_cb,
     ble_stealthchop_cb_t stealthchop_cb,
-    ble_invert_dir_cb_t invert_dir_cb)
+    ble_invert_dir_cb_t invert_dir_cb,
+    ble_continuous_cb_t continuous_cb)
 {
     s_start_cb = on_start_cb;
     s_connect_cb = on_connect_cb;
@@ -1445,6 +1491,7 @@ void ble_init(
     s_virtual_limit_cb = virtual_limit_cb;
     s_stealthchop_cb = stealthchop_cb;
     s_invert_dir_cb = invert_dir_cb;
+    s_continuous_cb = continuous_cb;
 
     // Initialize NVS (must be done by application before calling ble_init)
     // Note: we assume app already called nvs_flash_init(); otherwise we do it here.
@@ -1550,6 +1597,11 @@ void ble_set_axis_accel_value(uint16_t x, uint16_t c, uint16_t b)
 void ble_set_virtual_limit_value(bool x_en, bool c_en, bool b_en)
 {
     virtual_limit_val[0] = (x_en ? 0x01 : 0) | (c_en ? 0x02 : 0) | (b_en ? 0x04 : 0);
+}
+
+void ble_set_continuous_value(bool x, bool c, bool b)
+{
+    continuous_val[0] = (x ? 0x01 : 0) | (c ? 0x02 : 0) | (b ? 0x04 : 0);
 }
 
 // ----------------------------- Send Limit Notification -----------------------------

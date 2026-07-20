@@ -150,3 +150,15 @@ void app_config_pack_invert_dir(app_config_t *cfg, bool x_inv, bool c_inv, bool 
                       (c_inv ? 0x02 : 0) |
                       (b_inv ? 0x04 : 0);
 }
+
+void app_config_unpack_continuous(const app_config_t *cfg, bool *x, bool *c, bool *b)
+{
+    if (x) *x = (cfg->continuous & 0x01) != 0;
+    if (c) *c = (cfg->continuous & 0x02) != 0;
+    if (b) *b = (cfg->continuous & 0x04) != 0;
+}
+
+void app_config_pack_continuous(app_config_t *cfg, bool x, bool c, bool b)
+{
+    cfg->continuous = (uint8_t)((x ? 0x01 : 0) | (c ? 0x02 : 0) | (b ? 0x04 : 0));
+}

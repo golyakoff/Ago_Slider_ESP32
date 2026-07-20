@@ -23,6 +23,8 @@ typedef struct {
     uint8_t virtual_limit;          // 3 bits: enable virtual limit per axis (bit0=X,bit1=C,bit2=B)
     uint8_t stealthchop;            // 3 bits: enable stealthchop (bit0=X,bit1=C,bit2=B)
     uint8_t invert_dir;             // 3 bits: invert axis direction (bit0=X,bit1=C,bit2=B)
+    uint8_t continuous;             // 3 bits: axis turns a full circle past a single index
+                                    // magnet rather than running between two endstops
 } app_config_t;
 #pragma pack(pop)
 
@@ -129,6 +131,16 @@ void app_config_unpack_invert_dir(const app_config_t *cfg, bool *x_inv, bool *c_
  * @brief Pack invert direction flags into raw config structure.
  */
 void app_config_pack_invert_dir(app_config_t *cfg, bool x_inv, bool c_inv, bool b_inv);
+
+/**
+ * @brief Unpack the "continuous rotary" flags. Such an axis has no travel limits: it turns
+ *        full circles past ONE index magnet, which the calibration meets from both sides, so
+ *        its measured span is a whole revolution less the width of the trigger zone.
+ */
+void app_config_unpack_continuous(const app_config_t *cfg, bool *x, bool *c, bool *b);
+
+/** @brief Pack the "continuous rotary" flags. */
+void app_config_pack_continuous(app_config_t *cfg, bool x, bool c, bool b);
 
 
 #ifdef __cplusplus

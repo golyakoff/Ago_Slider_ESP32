@@ -86,6 +86,7 @@ All characteristics use 16‑bit UUIDs.
 | 0xF037 | VIRTUAL_LIMIT    | 1    | Enable virtual limit (bits: X, C, B) |
 | 0xF038 | STEALTHCHOP      | 1    | Enable StealthChop mode per axis (bits) |
 | 0xF039 | INVERT_DIR       | 1    | Invert direction per axis (bits) |
+| 0xF03A | CONTINUOUS       | Read / Write          | Continuous-rotary flags (bits 0-2: X, C, B). Such an axis turns full circles past one index magnet instead of running between two endstops, so its calibrated span is a revolution less the trigger zone |
 
 #### OTA (Over‑the‑Air)
 

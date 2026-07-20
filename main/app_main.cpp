@@ -160,6 +160,7 @@ static void on_axis_accel(uint16_t x, uint16_t c, uint16_t b);
 static void on_virtual_limit(bool x_en, bool c_en, bool b_en);
 static void on_stealthchop(bool x_en, bool c_en, bool b_en);
 static void on_invert_dir(bool x_inv, bool c_inv, bool b_inv);
+static void on_continuous(bool x, bool c, bool b);
 
 static const char* on_version_read(void);
 static void on_ota_control(const uint8_t* data, size_t len);
@@ -248,7 +249,8 @@ extern "C" void app_main(void)
         on_axis_accel,
         on_virtual_limit,
         on_stealthchop,
-        on_invert_dir);
+        on_invert_dir,
+        on_continuous);
 
     // Publishes POSITION notifications while the axes move
     xTaskCreate(position_publisher_task, "position_pub", 2048, NULL, 1, NULL);
@@ -905,6 +907,11 @@ static void on_stealthchop(bool x_en, bool c_en, bool b_en) {
     tmc2130_set_stealthchop(AXIS_B_ID, b_en);
 }
 
+static void on_continuous(bool x, bool c, bool b) {
+    ESP_LOGI(TAG, "Config: continuous rotary X=%d, C=%d, B=%d", x, c, b);
+    nvs_config_set_continuous(x, c, b);
+}
+
 static void on_invert_dir(bool x_inv, bool c_inv, bool b_inv) {
     ESP_LOGI(TAG, "Config: invert direction X=%d, C=%d, B=%d", x_inv, c_inv, b_inv);
     nvs_config_set_invert_dir(x_inv, c_inv, b_inv);
@@ -962,6 +969,13 @@ static void ble_apply_config(const app_config_t *cfg)
         (cfg->virtual_limit & 0x01) != 0,
         (cfg->virtual_limit & 0x02) != 0,
         (cfg->virtual_limit & 0x04) != 0
+    );
+
+    // Continuous rotary
+    ble_set_continuous_value(
+        (cfg->continuous & 0x01) != 0,
+        (cfg->continuous & 0x02) != 0,
+        (cfg->continuous & 0x04) != 0
     );
 }
 
