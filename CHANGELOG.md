@@ -1,3 +1,9 @@
+# Release 0.1.6
+
+- The battery gauge is calibrated against the actual pack: a full charge reads about 20.2 V
+  here rather than the 21.0 V a 5-cell Li-ion reaches in theory, so a freshly charged
+  battery used to show 65%.
+
 # Release 0.1.5
 
 - Axis speeds now mean what they say. The step interval was computed from 10^7 instead of
