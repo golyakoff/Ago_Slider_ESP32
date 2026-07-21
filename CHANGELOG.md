@@ -1,3 +1,10 @@
+# Release 0.1.8
+
+- The focus scenario now keeps the subject framed vertically too: the tilt axis aims at the
+  same fixed 3D point as the pan, so a subject above or below the lens no longer drifts out
+  of frame in the middle of the pass. The small end-of-pass tracking lag is closed smoothly
+  while keeping the eased stop.
+
 # Release 0.1.7
 
 - Axes that turn full circles are now understood as such. A new per-axis setting marks an
