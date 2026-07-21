@@ -32,32 +32,27 @@ and needed to be redesigned for ESP-IDF.
   fixed 30 ms per-chunk delay is gone. Prepared long writes are still supported firmware-
   side (buffer + EXEC_WRITE) for compatibility with app v0.1.0.
 
-## Focus scenario: C lags at the end of a pass
+## Focus scenario: C/B lag at the end of a pass — ADDRESSED, awaiting hardware confirmation
 
-Measured on hardware 2026-07-20 (60 s pass, 770 mm of X travel, subject 27 cm away): C
-tracks the subject to within 4 pulses (0.05 deg) for about 95% of the run, then falls
-behind by 49 pulses (0.65 deg) over the last 1.5 s. In frame that is a slight slide off
-centre in the closing second — invisible on a normal lens, but not on a long one.
+Symptom (60 s pass, 770 mm, subject 27 cm): tracking held to ~0.05 deg for ~95% of the run,
+then C fell ~49 pulses (0.65 deg) behind over X's ~1.5 s deceleration. Visible only in the log,
+not reported on video, but a long lens or a butt-cut would show it.
 
-The error appears exactly when X begins decelerating. The feed-forward term is proportional
-to X's instantaneous speed, so it vanishes as X stops, leaving only the correction term,
-whose 3 s time constant is far too slow for a ~1.5 s deceleration ramp.
+Mechanism (now understood): the `cmd` in the log is the commanded speed CAP, not the actual
+speed. As X decelerates the tracked axis's ACTUAL speed lags the shrinking cap because of its
+own deceleration ramp, so it arrives short; the fixed 3 s correction time constant is far too
+slow to close the gap in the ~1 s of deceleration left. Nothing "froze" — the axis just ran
+slower than the cap while both were falling.
 
-That explanation is incomplete, and the gap matters: the captured log shows C's position
-frozen at 2767 pulses for the final 1.5 s while the commanded speed was still non-zero
-(66 -> 43 -> 16 pulses/s). Something stopped the axis outright rather than merely slowing
-it, and the feed-forward argument does not account for that. **Start here**, not with
-tuning.
+Fix applied (firmware, scenario_focus.cpp, not yet hardware-confirmed):
+- Tracking acceleration for C and B raised from `peak/ramp_s` (~1.5 s to reach speed) to
+  `peak/0.3 s`. The tracking is closed-loop on X's real speed, so a brisk acceleration only
+  tightens how closely the axis holds the commanded speed; it does not over-lead at ramp-in
+  because the command already follows X.
+- Correction time constant scales down with the time remaining, floored at 1 s, so the small
+  residual is driven out smoothly (~0.65 deg/s, invisible) before X stops, instead of being
+  frozen in by the stop. The ease-out is kept — the user rejected both a hard forceStop (jolt +
+  step-loss risk on the loaded X rail) and a post-stop settle phase (pads the shot).
 
-Rejected: a settle phase after X stops. It would force the user to pad every shot with
-footage they do not want.
-
-Candidate directions:
-- Explain the freeze first — instrument `motion_axis_set_speed` / the ramp generator's
-  state around the deceleration, and check whether `applySpeedAcceleration()` behaves as
-  assumed when the speed cap falls steeply while running continuously.
-- Shorten the ramp: the error accumulates over the deceleration, so less time in it means
-  less to accumulate. The scenario currently computes its own ramp (5% of duration, capped
-  at 2 s) and deliberately ignores the stored settings, so this needs a new parameter
-  before it is a lever the user can reach.
-- Scale the correction's time constant with how much of the pass is left.
+If a residual remains after this, the next lever is a post-X-stop settle explicitly bounded in
+time, but only if the user accepts a fraction of a second of post-roll.
